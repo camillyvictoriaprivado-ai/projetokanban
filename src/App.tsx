@@ -7,6 +7,8 @@ import {
 } from "lucide-react";
 
 const API_URL = "https://script.google.com/macros/s/AKfycbwrNNlyRWYq5zayRYSlRfRSC_bFY7tjc4DXxL6TF3YSnHwMOw_h7HY2wF6qFW3MSQsXBQ/exec";
+const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; // { [taskId]: Annotation[] }
+const LS_COLUMNS_KEY     = "tlp_kanban_columns";     // { [taskId]: columnId }  — posição persistida
 
 const COLLABORATORS = [
   { name: "Camilly Silva",  initials: "CS", color: "#4f46e5" },
@@ -112,7 +114,16 @@ function TaskDetailModal({
   const [newSubtask, setNewSubtask] = useState({ title: "", assignee: "", status: "pendente" as SubtaskStatus });
   const [showSubtaskForm, setShowSubtaskForm] = useState(false);
 
-  const save = (updated: KanbanTask) => { setLocal(updated); onUpdate(updated); };
+  const save = (updated: KanbanTask) => {
+    setLocal(updated);
+    onUpdate(updated);
+    // Persiste anotações no localStorage para sobreviver ao reload
+    try {
+      const stored = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}");
+      stored[updated.id] = updated.annotations;
+      localStorage.setItem(LS_ANNOTATIONS_KEY, JSON.stringify(stored));
+    } catch {}
+  };
 
   const addCheckItem = () => {
     if (!newCheckItem.trim()) return;
@@ -185,15 +196,13 @@ function TaskDetailModal({
               </button>
             ) : (
               <>
-                {task.previousColumnId && (
-                  <button
-                    onClick={() => { onReturn(columnId, task.id); onClose(); }}
-                    className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all"
-                    style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}
-                  >
-                    <RefreshCw size={14} /> Retornar
-                  </button>
-                )}
+                <button
+                  onClick={() => { onReturn(columnId, task.id); onClose(); }}
+                  className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all"
+                  style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}
+                >
+                  <RefreshCw size={14} /> Retornar
+                </button>
                 <button
                   onClick={() => { if (confirm("Deletar permanentemente dos concluídos?")) { onRemove(columnId, task.id); onClose(); } }}
                   className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all"
@@ -467,21 +476,39 @@ export default function App() {
 
   useEffect(() => { loadKanban(); }, []);
 
+  const persistColumnPos = (taskId: string, colId: string) => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY) || "{}");
+      stored[taskId] = colId;
+      localStorage.setItem(LS_COLUMNS_KEY, JSON.stringify(stored));
+    } catch {}
+  };
+
   const loadKanban = async () => {
     try {
       setLoading(true);
       const response = await fetch(API_URL);
       const data = await response.json();
       if (data && typeof data === "object" && !Array.isArray(data)) {
-        const builtColumns = officialColumnsStructure.map((col) => {
+        // Recupera anotações e posições salvas localmente
+        let savedAnnotations: Record<string, Annotation[]> = {};
+        let savedColumns: Record<string, string> = {};
+        try { savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
+        try { savedColumns    = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY)     || "{}"); } catch {}
+
+        // Monta todas as tarefas flat primeiro para poder redistribuir por coluna local
+        const allTasksFlat: { task: KanbanTask; apiColId: string }[] = [];
+        officialColumnsStructure.forEach((col) => {
           const rawTasks = data[col.id] || [];
-          const formattedTasks: KanbanTask[] = [];
-          if (Array.isArray(rawTasks)) {
-            rawTasks.forEach((task: any, index: number) => {
-              if (!task) return;
-              const meta = getCollabMeta(task.assignee || "Não atribuído");
-              formattedTasks.push({
-                id: task.id ? String(task.id) : `${col.id}-task-${index}`,
+          if (!Array.isArray(rawTasks)) return;
+          rawTasks.forEach((task: any, index: number) => {
+            if (!task) return;
+            const meta = getCollabMeta(task.assignee || "Não atribuído");
+            const taskId = task.id ? String(task.id) : `${col.id}-task-${index}`;
+            allTasksFlat.push({
+              apiColId: col.id,
+              task: {
+                id: taskId,
                 title: task.title || "Sem ID",
                 ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
                 cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
@@ -498,12 +525,24 @@ export default function App() {
                 tags: Array.isArray(task.tags) ? task.tags : [],
                 checklist: [],
                 subtasks: [],
-                annotations: [],
-              });
+                // Restaura anotações salvas localmente
+                annotations: savedAnnotations[taskId] ?? [],
+              },
             });
-          }
-          return { ...col, tasks: formattedTasks };
+          });
         });
+
+        // Distribui tarefas respeitando posição local salva
+        const builtColumns = officialColumnsStructure.map((col) => {
+          const tasks = allTasksFlat
+            .filter(({ task, apiColId }) => {
+              const localCol = savedColumns[task.id];
+              return localCol ? localCol === col.id : apiColId === col.id;
+            })
+            .map(({ task }) => task);
+          return { ...col, tasks };
+        });
+
         setColumns(builtColumns);
       }
     } catch (error) {
@@ -562,6 +601,7 @@ export default function App() {
       const result = await res.json().catch(() => ({ status: "error", message: "Resposta inválida" }));
 
       if (result.status === "success") {
+        persistColumnPos(taskId, "concluido");
         showToast("Tarefa concluída com sucesso!", "success");
       } else {
         // 4. Se falhou, faz rollback do estado para não perder o card
@@ -600,6 +640,7 @@ export default function App() {
       );
     });
     showToast("Tarefa retornada!", "success");
+    persistColumnPos(taskId, targetColId);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToReturn, targetColumn: targetColId }) }).catch(() => {});
   };
 
@@ -631,6 +672,7 @@ export default function App() {
       );
     });
     showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
+    persistColumnPos(taskId, toColId);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: toColId }) }).catch(() => {});
     setDragState(null);
     setDragOverCol(null);
@@ -646,6 +688,13 @@ export default function App() {
       }),
     })), [columns, filterAssignee, searchQuery]
   );
+
+  // IDs duplicados (title) considerando TODAS as colunas (sem filtro)
+  const duplicateTitleSet = useMemo(() => {
+    const count: Record<string, number> = {};
+    columns.forEach(col => col.tasks.forEach(t => { count[t.title] = (count[t.title] || 0) + 1; }));
+    return new Set(Object.entries(count).filter(([, n]) => n > 1).map(([k]) => k));
+  }, [columns]);
 
   const navItems = [
     { id: "kanban",        label: "Kanban",       icon: <LayoutGrid size={18} /> },
@@ -834,6 +883,7 @@ export default function App() {
                   {col.tasks.map(task => {
                     const prio = priorityBadge(task.priority);
                     const meta = getCollabMeta(task.assignee);
+                    const isDuplicate = duplicateTitleSet.has(task.title);
                     return (
                       <div
                         key={task.id}
@@ -841,7 +891,11 @@ export default function App() {
                         onDragStart={() => handleDragStart(task.id, col.id)}
                         onDragEnd={() => { setDragState(null); setDragOverCol(null); }}
                         className="bg-white rounded-2xl shadow-sm group hover:shadow-md transition-all cursor-grab active:cursor-grabbing overflow-hidden"
-                        style={{ border: "1px solid #e8ecf4", opacity: dragState?.taskId === task.id ? 0.5 : 1 }}
+                        style={{
+                          border: isDuplicate ? "1.5px solid #f59e0b" : "1px solid #e8ecf4",
+                          opacity: dragState?.taskId === task.id ? 0.5 : 1,
+                          background: isDuplicate ? "#fffdf0" : "#fff",
+                        }}
                         onClick={() => setOpenTask({ task, columnId: col.id })}
                       >
                         {/* Left accent bar */}
@@ -850,7 +904,14 @@ export default function App() {
                           <div className="flex-1 p-3.5">
                             {/* Title row */}
                             <div className="flex items-center justify-between gap-2 mb-2.5">
-                              <span className="text-sm font-black text-[#0f172a] truncate leading-tight">{task.title}</span>
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span className="text-sm font-black text-[#0f172a] truncate leading-tight">{task.title}</span>
+                                {isDuplicate && (
+                                  <span className="shrink-0 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#b45309", border: "1px solid #f59e0b" }}>
+                                    ID dup.
+                                  </span>
+                                )}
+                              </div>
                               <span className="flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded-full shrink-0" style={{ background: prio.bg, color: prio.text }}>
                                 <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: prio.dot }} />
                                 {prio.label}
@@ -915,15 +976,13 @@ export default function App() {
                                   </button>
                                 ) : (
                                   <div className="flex items-center gap-1.5">
-                                    {task.previousColumnId && (
-                                      <button
-                                        onClick={() => handleReturnTask(col.id, task.id)}
-                                        className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white"
-                                        style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}
-                                      >
-                                        <RefreshCw size={11} /> Retornar
-                                      </button>
-                                    )}
+                                    <button
+                                      onClick={() => handleReturnTask(col.id, task.id)}
+                                      className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white"
+                                      style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}
+                                    >
+                                      <RefreshCw size={11} /> Retornar
+                                    </button>
                                     <button
                                       onClick={() => { if (confirm("Deletar permanentemente?")) handleRemoveFromCompleted(col.id, task.id); }}
                                       className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all"
