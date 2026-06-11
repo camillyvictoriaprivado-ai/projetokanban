@@ -46,7 +46,6 @@ interface KanbanTask {
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
-// CORREÇÃO: Identifica cada card individualmente pelo ID gerado, não mais pelo título repetido
 function getPersistKey(task: Pick<KanbanTask, "id" | "title">): string {
   return `i:${task.id}`;
 }
@@ -242,7 +241,7 @@ function TaskDetailModal({
             <div className="space-y-5">
               <div className="grid grid-cols-2 gap-2.5">
                 {[
-                  { icon: <Tag size={12} />,       label: "ID",          value: local.id },
+                  { icon: <Tag size={12} />,       label: "ID",          value: local.title },
                   { icon: <Zap size={12} />,        label: "Ionix",       value: local.ionix || "—" },
                   { icon: <LayoutGrid size={12} />, label: "Cluster",     value: local.cluster || "—" },
                   { icon: <ChevronRight size={12} />,label: "UF",         value: local.uf || "—" },
@@ -535,11 +534,13 @@ export default function App() {
           rawTasks.forEach((task: any, index: number) => {
             if (!task) return;
             
+            // CORREÇÃO: Criação de um ID único composto para o front-end
             const taskId = task.id
-  ? String(task.id)
-  : `${col.id}-task-${index}`;
+              ? `${task.id}-${col.id}-${index}`
+              : `${col.id}-task-${index}`;
 
-const taskTitle = taskId;
+            // O título preserva exclusivamente o valor numérico original do Sheets
+            const taskTitle = task.id ? String(task.id) : taskId;
 
             const meta = getCollabMeta(task.assignee || "Não atribuído");
             const builtTask: KanbanTask = {
@@ -674,7 +675,10 @@ const taskTitle = taskId;
   const updateTask = (updated: KanbanTask) => {
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
     ablyChannelRef.current?.publish("taskUpdated", { updatedTask: updated });
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: updated }) }).catch(() => {});
+    
+    // CORREÇÃO: Limpa o ID composto antes de enviar ao Google Sheets
+    const cleanTask = { ...updated, id: updated.id.split('-')[0] };
+    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: cleanTask }) }).catch(() => {});
   };
 
   const handleAssigneeChange = async (taskId: string, newAssignee: string) => {
@@ -695,7 +699,10 @@ const taskTitle = taskId;
     if (updatedTask) {
       ablyChannelRef.current?.publish("taskUpdated", { updatedTask });
     }
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId, assignee: newAssignee }) }).catch(() => {});
+    
+    // CORREÇÃO: Limpa o ID composto
+    const cleanId = taskId.split('-')[0];
+    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId: cleanId, assignee: newAssignee }) }).catch(() => {});
   };
 
   const handleCompleteTask = async (columnId: string, taskId: string) => {
@@ -724,9 +731,11 @@ const taskTitle = taskId;
     showToast("Enviando para o Sheets...", "loading");
 
     try {
+      // CORREÇÃO: Envia o ID limpo para a API
+      const cleanTask = { ...taskToMove!, id: taskToMove!.id.split('-')[0] };
       const res = await fetch(API_URL, {
         method: "POST",
-        body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: "concluido" }),
+        body: JSON.stringify({ action: "updateTask", task: cleanTask, targetColumn: "concluido" }),
       });
 
       const result = await res.json().catch(() => ({ status: "error", message: "Resposta inválida" }));
@@ -752,7 +761,10 @@ const taskTitle = taskId;
     ablyChannelRef.current?.publish("taskDeleted", { taskId });
 
     if (taskToDelete) persistDeletion(taskToDelete);
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId }) }).catch(() => {});
+    
+    // CORREÇÃO: Limpa o ID composto
+    const cleanId = taskId.split('-')[0];
+    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId: cleanId }) }).catch(() => {});
   };
 
   const handleReturnTask = async (columnId: string, taskId: string) => {
@@ -779,7 +791,10 @@ const taskTitle = taskId;
     ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: targetColId, task: finalTask });
     showToast("Tarefa retornada!", "success");
     persistColumnPos(finalTask, targetColId);
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToReturn, targetColumn: targetColId }) }).catch(() => {});
+    
+    // CORREÇÃO: Limpa o ID composto
+    const cleanTask = { ...taskToReturn, id: taskToReturn.id.split('-')[0] };
+    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: cleanTask, targetColumn: targetColId }) }).catch(() => {});
   };
 
   const handleDragStart = (taskId: string, fromColId: string) => {
@@ -815,9 +830,12 @@ const taskTitle = taskId;
     persistColumnPos(taskToMove, toColId);
 
     const apiAction = toColId === "acaost" ? "createActionST" : "updateTask";
+    
+    // CORREÇÃO: Limpa o ID composto antes do POST
+    const cleanTask = { ...taskToMove, id: taskToMove.id.split('-')[0] };
     fetch(API_URL, { 
       method: "POST", 
-      body: JSON.stringify({ action: apiAction, task: taskToMove, targetColumn: toColId }) 
+      body: JSON.stringify({ action: apiAction, task: cleanTask, targetColumn: toColId }) 
     }).then(res => res.json()).catch(() => {});
 
     setDragState(null);
@@ -842,7 +860,6 @@ const taskTitle = taskId;
     })), [columns, filterAssignee, searchQuery]
   );
 
-  // Monitora apenas itens duplicados na MESMA exibição visual para fins estéticos (borda amarela) se necessário
   const duplicateTitleSet = useMemo(() => {
     const count: Record<string, number> = {};
     columns.forEach(col => col.tasks.forEach(t => { count[t.title] = (count[t.title] || 0) + 1; }));
@@ -1032,7 +1049,6 @@ const taskTitle = taskId;
                         className="bg-white rounded-2xl shadow-sm group hover:shadow-md transition-all cursor-grab active:cursor-grabbing overflow-hidden"
                         style={{
                           border: isDuplicate ? "1.5px solid #f59e0b" : "1px solid #e8ecf4",
-                          // CORREÇÃO: foca exclusivamente no ID único da tarefa, isolando a opacidade/seleção
                           opacity: dragState?.taskId === task.id ? 0.5 : 1,
                           background: isDuplicate ? "#fffdf0" : "#fff",
                         }}
@@ -1043,9 +1059,10 @@ const taskTitle = taskId;
                           <div className="flex-1 p-3.5">
                             <div className="flex items-center justify-between gap-2 mb-2.5">
                               <div className="flex items-center gap-1.5 min-w-0">
+                                {/* CORREÇÃO: Renderiza task.title para exibir o ID numérico correto do Sheets */}
                                 <div className="text-[10px] font-bold text-indigo-600">
-  ID: {task.id}
-</div>
+                                  ID: {task.title}
+                                </div>
                                 {isDuplicate && (
                                   <span className="shrink-0 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#b45309", border: "1px solid #f59e0b" }}>
                                     ID dup.
