@@ -13,10 +13,11 @@ const API_URL = "https://script.google.com/macros/s/AKfycbwrNNlyRWYq5zayRYSlRfRS
 const ABLY_API_KEY = "BUp6Lg.QfvVuw:DBQaijX7rEyBdz4A1dXnrDXE68wWcCWkQTUG_BLSk9E"; 
 const ABLY_CHANNEL_NAME = "kanban-live";
 
-const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; 
-const LS_COLUMNS_KEY     = "tlp_kanban_columns";     
-const LS_PENDING_KEY     = "tlp_kanban_pending";     
-const LS_DELETED_KEY     = "tlp_kanban_deleted";     
+// IMPORTANTE: Mudamos o sufixo das chaves para limpar o lixo do LocalStorage antigo que travava os cards juntos
+const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations_v2"; 
+const LS_COLUMNS_KEY     = "tlp_kanban_columns_v2";     
+const LS_PENDING_KEY     = "tlp_kanban_pending_v2";     
+const LS_DELETED_KEY     = "tlp_kanban_deleted_v2";     
 const PENDING_TTL_MS = 3 * 60 * 1000; 
 
 const COLLABORATORS = [
@@ -46,8 +47,8 @@ interface KanbanTask {
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
-function getPersistKey(task: Pick<KanbanTask, "id" | "title">): string {
-  return `i:${task.id}`;
+function getPersistKey(task: KanbanTask): string {
+  return `task:${task.id}`;
 }
 
 function getCollabMeta(name: string) {
@@ -458,6 +459,7 @@ export default function App() {
   const [dragOverCol, setDragOverCol] = useState<string | null>(null);
 
   const ablyChannelRef = useRef<any>(null);
+  const myClientIdRef = useRef<string>(`client-${Math.random().toString(36).substr(2, 9)}`);
 
   const showToast = useCallback((message: string, type: "success" | "error" | "loading") => {
     setToast({ message, type });
@@ -512,7 +514,7 @@ export default function App() {
       if (!silent) setLoading(true);
       const response = await fetch(API_URL);
       const data = await response.json();
-      console.log(data);
+      
       if (data && typeof data === "object" && !Array.isArray(data)) {
         let savedAnnotations: Record<string, Annotation[]> = {};
         let savedColumns: Record<string, string> = {};
@@ -534,18 +536,15 @@ export default function App() {
           rawTasks.forEach((task: any, index: number) => {
             if (!task) return;
             
-            // CORREÇÃO: Criação de um ID único composto para o front-end
-            const taskId = task.id
-              ? `${task.id}-${col.id}-${index}`
-              : `${col.id}-task-${index}`;
-
-            // O título preserva exclusivamente o valor numérico original do Sheets
-            const taskTitle = task.id ? String(task.id) : taskId;
+            // 🌟 ULTRA BLINDAGEM: Criamos um ID composto que une Coluna + ID do Sheets + Linha.
+            // Isso impede que múltiplos cards com o mesmo número de ID fiquem idênticos para o React.
+            const rawId = task.id ? String(task.id) : `task`;
+            const uniqueId = `${col.id}-${rawId}-${index}`;
 
             const meta = getCollabMeta(task.assignee || "Não atribuído");
             const builtTask: KanbanTask = {
-              id: taskId,
-              title: taskTitle,
+              id: uniqueId, 
+              title: rawId, // Mantém o ID original limpo visível no card
               ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
               cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
               uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
@@ -624,16 +623,16 @@ export default function App() {
   useEffect(() => { loadKanban(); }, [loadKanban]);
 
   useEffect(() => {
-    if (!ABLY_API_KEY || ABLY_API_KEY.includes("SUA_CHAVE_DO_ABLY")) {
-      console.warn("Ably não configurado. Por favor, insira uma API Key válida.");
-      return;
-    }
+    if (!ABLY_API_KEY || ABLY_API_KEY.includes("SUA_CHAVE_DO_ABLY")) return;
 
     const ably = new Realtime({ key: ABLY_API_KEY });
     const channel = ably.channels.get(ABLY_CHANNEL_NAME);
     ablyChannelRef.current = channel;
 
     channel.subscribe("taskMoved", (message) => {
+      // Ignora ecos enviados por nós mesmos
+      if (message.data.senderId === myClientIdRef.current) return;
+
       const { taskId, fromColId, toColId, task } = message.data;
       
       setColumns(prev => {
@@ -651,6 +650,7 @@ export default function App() {
     });
 
     channel.subscribe("taskUpdated", (message) => {
+      if (message.data.senderId === myClientIdRef.current) return;
       const { updatedTask } = message.data;
       setColumns(prev => prev.map(col => ({
         ...col,
@@ -659,6 +659,7 @@ export default function App() {
     });
 
     channel.subscribe("taskDeleted", (message) => {
+      if (message.data.senderId === myClientIdRef.current) return;
       const { taskId } = message.data;
       setColumns(prev => prev.map(col => ({
         ...col,
@@ -674,11 +675,10 @@ export default function App() {
 
   const updateTask = (updated: KanbanTask) => {
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
-    ablyChannelRef.current?.publish("taskUpdated", { updatedTask: updated });
+    ablyChannelRef.current?.publish("taskUpdated", { updatedTask: updated, senderId: myClientIdRef.current });
     
-    // CORREÇÃO: Limpa o ID composto antes de enviar ao Google Sheets
-    const cleanTask = { ...updated, id: updated.id.split('-')[0] };
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: cleanTask }) }).catch(() => {});
+    // Sempre limpamos o ID composto enviando apenas o ID limpo (title) para o Sheets
+    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: { ...updated, id: updated.title } }) }).catch(() => {});
   };
 
   const handleAssigneeChange = async (taskId: string, newAssignee: string) => {
@@ -697,12 +697,10 @@ export default function App() {
     })));
 
     if (updatedTask) {
-      ablyChannelRef.current?.publish("taskUpdated", { updatedTask });
+      ablyChannelRef.current?.publish("taskUpdated", { updatedTask, senderId: myClientIdRef.current });
+      const cleanId = (updatedTask as KanbanTask).title;
+      fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId: cleanId, assignee: newAssignee }) }).catch(() => {});
     }
-    
-    // CORREÇÃO: Limpa o ID composto
-    const cleanId = taskId.split('-')[0];
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId: cleanId, assignee: newAssignee }) }).catch(() => {});
   };
 
   const handleCompleteTask = async (columnId: string, taskId: string) => {
@@ -727,12 +725,11 @@ export default function App() {
       );
     });
 
-    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: "concluido", task: taskToMove });
+    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: "concluido", task: taskToMove, senderId: myClientIdRef.current });
     showToast("Enviando para o Sheets...", "loading");
 
     try {
-      // CORREÇÃO: Envia o ID limpo para a API
-      const cleanTask = { ...taskToMove!, id: taskToMove!.id.split('-')[0] };
+      const cleanTask = { ...taskToMove!, id: taskToMove!.title };
       const res = await fetch(API_URL, {
         method: "POST",
         body: JSON.stringify({ action: "updateTask", task: cleanTask, targetColumn: "concluido" }),
@@ -758,13 +755,13 @@ export default function App() {
     const taskToDelete = sourceCol?.tasks.find(t => t.id === taskId);
     
     setColumns(prev => prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col));
-    ablyChannelRef.current?.publish("taskDeleted", { taskId });
+    ablyChannelRef.current?.publish("taskDeleted", { taskId, senderId: myClientIdRef.current });
 
-    if (taskToDelete) persistDeletion(taskToDelete);
-    
-    // CORREÇÃO: Limpa o ID composto
-    const cleanId = taskId.split('-')[0];
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId: cleanId }) }).catch(() => {});
+    if (taskToDelete) {
+      persistDeletion(taskToDelete);
+      const cleanId = taskToDelete.title;
+      fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId: cleanId }) }).catch(() => {});
+    }
   };
 
   const handleReturnTask = async (columnId: string, taskId: string) => {
@@ -788,12 +785,11 @@ export default function App() {
       );
     });
 
-    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: targetColId, task: finalTask });
+    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: targetColId, task: finalTask, senderId: myClientIdRef.current });
     showToast("Tarefa retornada!", "success");
     persistColumnPos(finalTask, targetColId);
     
-    // CORREÇÃO: Limpa o ID composto
-    const cleanTask = { ...taskToReturn, id: taskToReturn.id.split('-')[0] };
+    const cleanTask = { ...taskToReturn, id: taskToReturn.title };
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: cleanTask, targetColumn: targetColId }) }).catch(() => {});
   };
 
@@ -816,27 +812,37 @@ export default function App() {
     }
     if (!taskToMove) { setDragState(null); setDragOverCol(null); return; }
 
+    // Ao soltar o card, reformulamos o ID único do React para conter a nova coluna de destino
+    const targetTaskId = `${toColId}-${taskToMove.title}-${Date.now()}`;
+    const preparedTask = { ...taskToMove, id: targetTaskId };
+
     setColumns(prev => {
       const withoutTask = prev.map(col =>
         col.id === fromColId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
       );
       return withoutTask.map(col =>
-        col.id === toColId ? { ...col, tasks: [...col.tasks, taskToMove!] } : col
+        col.id === toColId ? { ...col, tasks: [...col.tasks, preparedTask] } : col
       );
     });
 
-    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId, toColId, task: taskToMove });
+    ablyChannelRef.current?.publish("taskMoved", { 
+      taskId, 
+      fromColId, 
+      toColId, 
+      task: preparedTask, 
+      senderId: myClientIdRef.current 
+    });
+
     showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
-    persistColumnPos(taskToMove, toColId);
+    persistColumnPos(preparedTask, toColId);
 
     const apiAction = toColId === "acaost" ? "createActionST" : "updateTask";
+    const cleanTask = { ...preparedTask, id: preparedTask.title };
     
-    // CORREÇÃO: Limpa o ID composto antes do POST
-    const cleanTask = { ...taskToMove, id: taskToMove.id.split('-')[0] };
     fetch(API_URL, { 
       method: "POST", 
       body: JSON.stringify({ action: apiAction, task: cleanTask, targetColumn: toColId }) 
-    }).then(res => res.json()).catch(() => {});
+    }).catch(() => {});
 
     setDragState(null);
     setDragOverCol(null);
@@ -885,7 +891,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2 text-sm font-semibold text-slate-400">
             <RefreshCw size={14} className="animate-spin text-indigo-400" />
-            Carregando do Sheets...
+            Carregando dados unificados...
           </div>
         </div>
       </div>
@@ -943,10 +949,9 @@ export default function App() {
 
         <div className="px-2 pb-4">
           <button
-            onClick={() => { loadKanban(); showToast("Forçando recarga completa...", "loading"); setTimeout(() => showToast("Quadro updated!", "success"), 800); }}
+            onClick={() => { loadKanban(); showToast("Atualizando dados do Sheets...", "loading"); }}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all"
             style={{ color: "#475569" }}
-            title="Recarregar tudo manualmente"
           >
             <RefreshCw size={18} style={{ color: "#475569" }} />
             {sidebarOpen && <span className="text-sm font-semibold">Forçar Recarga</span>}
@@ -1049,7 +1054,8 @@ export default function App() {
                         className="bg-white rounded-2xl shadow-sm group hover:shadow-md transition-all cursor-grab active:cursor-grabbing overflow-hidden"
                         style={{
                           border: isDuplicate ? "1.5px solid #f59e0b" : "1px solid #e8ecf4",
-                          opacity: dragState?.taskId === task.id ? 0.5 : 1,
+                          // A opacidade agora só afetará exatamente o card arrastado graças ao ID único!
+                          opacity: dragState?.taskId === task.id ? 0.3 : 1,
                           background: isDuplicate ? "#fffdf0" : "#fff",
                         }}
                         onClick={() => setOpenTask({ task, columnId: col.id })}
@@ -1059,7 +1065,6 @@ export default function App() {
                           <div className="flex-1 p-3.5">
                             <div className="flex items-center justify-between gap-2 mb-2.5">
                               <div className="flex items-center gap-1.5 min-w-0">
-                                {/* CORREÇÃO: Renderiza task.title para exibir o ID numérico correto do Sheets */}
                                 <div className="text-[10px] font-bold text-indigo-600">
                                   ID: {task.title}
                                 </div>
