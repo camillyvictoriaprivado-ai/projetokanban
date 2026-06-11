@@ -242,7 +242,7 @@ function TaskDetailModal({
             <div className="space-y-5">
               <div className="grid grid-cols-2 gap-2.5">
                 {[
-                  { icon: <Tag size={12} />,       label: "ID",          value: local.title },
+                  { icon: <Tag size={12} />,       label: "ID",          value: local.id },
                   { icon: <Zap size={12} />,        label: "Ionix",       value: local.ionix || "—" },
                   { icon: <LayoutGrid size={12} />, label: "Cluster",     value: local.cluster || "—" },
                   { icon: <ChevronRight size={12} />,label: "UF",         value: local.uf || "—" },
@@ -513,6 +513,7 @@ export default function App() {
       if (!silent) setLoading(true);
       const response = await fetch(API_URL);
       const data = await response.json();
+      console.log(data);
       if (data && typeof data === "object" && !Array.isArray(data)) {
         let savedAnnotations: Record<string, Annotation[]> = {};
         let savedColumns: Record<string, string> = {};
@@ -1039,7 +1040,9 @@ export default function App() {
                           <div className="flex-1 p-3.5">
                             <div className="flex items-center justify-between gap-2 mb-2.5">
                               <div className="flex items-center gap-1.5 min-w-0">
-                                <span className="text-sm font-black text-[#0f172a] truncate leading-tight">{task.title}</span>
+                                <div className="text-[10px] font-bold text-indigo-600">
+  ID: {task.id}
+</div>
                                 {isDuplicate && (
                                   <span className="shrink-0 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#b45309", border: "1px solid #f59e0b" }}>
                                     ID dup.
