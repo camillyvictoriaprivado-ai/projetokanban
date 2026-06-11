@@ -7,8 +7,12 @@ import {
 } from "lucide-react";
 
 const API_URL = "https://script.google.com/macros/s/AKfycbwrNNlyRWYq5zayRYSlRfRSC_bFY7tjc4DXxL6TF3YSnHwMOw_h7HY2wF6qFW3MSQsXBQ/exec";
-const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; // { [taskId]: Annotation[] }
-const LS_COLUMNS_KEY     = "tlp_kanban_columns";     // { [taskId]: columnId }  — posição persistida
+const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; // { [persistKey]: Annotation[] }
+const LS_COLUMNS_KEY     = "tlp_kanban_columns";     // { [persistKey]: columnId }
+const LS_PENDING_KEY     = "tlp_kanban_pending";     // { [persistKey]: { task, columnId, ts } }
+const LS_DELETED_KEY     = "tlp_kanban_deleted";     // { [persistKey]: ts }
+const PENDING_TTL_MS = 3 * 60 * 1000; // 3 min
+const POLL_INTERVAL_MS = 12 * 1000;   // Polling silencioso (12s)
 
 const COLLABORATORS = [
   { name: "Camilly Silva",  initials: "CS", color: "#4f46e5" },
@@ -39,6 +43,15 @@ interface KanbanTask {
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
+/**
+ * CORREÇÃO CRÍTICA: Para evitar que IDs duplicados movam juntos ou compartilhem notas,
+ * a chave de persistência local DEVE se basear no ID único do card (id da linha/rastreio),
+ * e nunca no título comercial repetido.
+ */
+function getPersistKey(task: Pick<KanbanTask, "id" | "title">): string {
+  return `i:${task.id}`;
+}
+
 function getCollabMeta(name: string) {
   const found = COLLABORATORS.find(c => c.name.toLowerCase() === name.toLowerCase());
   if (found) return found;
@@ -64,9 +77,6 @@ function stepStatusColor(s: StepStatus) {
   return "#d1d5db";
 }
 
-// ──────────────────────────────────────────
-// Toast notification
-// ──────────────────────────────────────────
 function Toast({ message, type, onDismiss }: { message: string; type: "success" | "error" | "loading"; onDismiss: () => void }) {
   useEffect(() => {
     if (type !== "loading") {
@@ -95,9 +105,6 @@ function Toast({ message, type, onDismiss }: { message: string; type: "success" 
   );
 }
 
-// ──────────────────────────────────────────
-// Task Detail Modal
-// ──────────────────────────────────────────
 function TaskDetailModal({
   task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn,
 }: {
@@ -114,13 +121,17 @@ function TaskDetailModal({
   const [newSubtask, setNewSubtask] = useState({ title: "", assignee: "", status: "pendente" as SubtaskStatus });
   const [showSubtaskForm, setShowSubtaskForm] = useState(false);
 
+  // Sincroniza o estado interno caso a tarefa mude por fora (via polling)
+  useEffect(() => {
+    setLocal({ ...task });
+  }, [task]);
+
   const save = (updated: KanbanTask) => {
     setLocal(updated);
     onUpdate(updated);
-    // Persiste anotações no localStorage para sobreviver ao reload
     try {
       const stored = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}");
-      stored[updated.id] = updated.annotations;
+      stored[getPersistKey(updated)] = updated.annotations;
       localStorage.setItem(LS_ANNOTATIONS_KEY, JSON.stringify(stored));
     } catch {}
   };
@@ -170,10 +181,8 @@ function TaskDetailModal({
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div className="relative flex flex-col rounded-3xl shadow-2xl overflow-hidden" style={{ width: 700, maxHeight: "92vh", background: "#fff" }}>
-        {/* Accent stripe */}
         <div className="h-1 w-full" style={{ background: "linear-gradient(90deg, #4f46e5, #7c3aed, #db2777)" }} />
 
-        {/* Header */}
         <div className="flex items-start justify-between px-7 pt-5 pb-4 border-b border-gray-100">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1.5">
@@ -218,7 +227,6 @@ function TaskDetailModal({
           </div>
         </div>
 
-        {/* Tabs */}
         <div className="flex gap-0 px-7 border-b border-gray-100" style={{ background: "#fafafa" }}>
           {tabs.map(tab => (
             <button
@@ -235,7 +243,6 @@ function TaskDetailModal({
           ))}
         </div>
 
-        {/* Body */}
         <div className="flex-1 overflow-y-auto px-7 py-5">
           {activeTab === "info" && (
             <div className="space-y-5">
@@ -248,8 +255,8 @@ function TaskDetailModal({
                   { icon: <FileText size={12} />,   label: "Material",    value: local.material || "—" },
                   { icon: <ClipboardList size={12} />, label: "Quantidade", value: local.quantidade || "—" },
                   { icon: <Calendar size={12} />,   label: "Vencimento",  value: local.dueDate || "—" },
-                ].map(row => (
-                  <div key={row.label} className="flex items-start gap-2.5 rounded-2xl px-3.5 py-3 border border-gray-100" style={{ background: "#f8fafc" }}>
+                ].map((row, i) => (
+                  <div key={i} className="flex items-start gap-2.5 rounded-2xl px-3.5 py-3 border border-gray-100" style={{ background: "#f8fafc" }}>
                     <span className="mt-0.5 text-indigo-400 shrink-0">{row.icon}</span>
                     <div>
                       <p className="text-[9px] font-black uppercase tracking-widest text-[#94a3b8] mb-0.5">{row.label}</p>
@@ -322,7 +329,6 @@ function TaskDetailModal({
             <div className="space-y-4">
               {local.checklist.length > 0 && (
                 <>
-                  {/* Progress bar */}
                   <div className="rounded-2xl p-3.5 border border-indigo-100" style={{ background: "#f5f3ff" }}>
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-xs font-bold text-indigo-700">Progresso</span>
@@ -445,9 +451,6 @@ function TaskDetailModal({
   );
 }
 
-// ──────────────────────────────────────────
-// Main App
-// ──────────────────────────────────────────
 export default function App() {
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
@@ -474,30 +477,59 @@ export default function App() {
     { id: "concluido",   title: "Concluído",    color: "#10b981", accent: "#f0fdf4" },
   ], []);
 
-  useEffect(() => { loadKanban(); }, []);
-
-  const persistColumnPos = (taskId: string, colId: string) => {
+  const persistColumnPos = (task: KanbanTask, colId: string) => {
+    const key = getPersistKey(task);
     try {
       const stored = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY) || "{}");
-      stored[taskId] = colId;
+      stored[key] = colId;
       localStorage.setItem(LS_COLUMNS_KEY, JSON.stringify(stored));
+    } catch {}
+    try {
+      const pending = JSON.parse(localStorage.getItem(LS_PENDING_KEY) || "{}");
+      pending[key] = { task: { ...task, previousColumnId: undefined }, columnId: colId, ts: Date.now() };
+      localStorage.setItem(LS_PENDING_KEY, JSON.stringify(pending));
+    } catch {}
+    try {
+      const deleted = JSON.parse(localStorage.getItem(LS_DELETED_KEY) || "{}");
+      if (deleted[key]) {
+        delete deleted[key];
+        localStorage.setItem(LS_DELETED_KEY, JSON.stringify(deleted));
+      }
     } catch {}
   };
 
-  const loadKanban = async () => {
+  const persistDeletion = (task: KanbanTask) => {
+    const key = getPersistKey(task);
     try {
-      setLoading(true);
+      const deleted = JSON.parse(localStorage.getItem(LS_DELETED_KEY) || "{}");
+      deleted[key] = Date.now();
+      localStorage.setItem(LS_DELETED_KEY, JSON.stringify(deleted));
+    } catch {}
+    try {
+      const pending = JSON.parse(localStorage.getItem(LS_PENDING_KEY) || "{}");
+      delete pending[key];
+      localStorage.setItem(LS_PENDING_KEY, JSON.stringify(pending));
+    } catch {}
+  };
+
+  const loadKanban = useCallback(async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
       const response = await fetch(API_URL);
       const data = await response.json();
       if (data && typeof data === "object" && !Array.isArray(data)) {
-        // Recupera anotações e posições salvas localmente
         let savedAnnotations: Record<string, Annotation[]> = {};
         let savedColumns: Record<string, string> = {};
+        let pending: Record<string, { task: KanbanTask; columnId: string; ts: number }> = {};
+        let deleted: Record<string, number> = {};
         try { savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
         try { savedColumns    = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY)     || "{}"); } catch {}
+        try { pending         = JSON.parse(localStorage.getItem(LS_PENDING_KEY)     || "{}"); } catch {}
+        try { deleted         = JSON.parse(localStorage.getItem(LS_DELETED_KEY)     || "{}"); } catch {}
 
-        // Monta todas as tarefas flat primeiro para poder redistribuir por coluna local
-        const allTasksFlat: { task: KanbanTask; apiColId: string }[] = [];
+        const now = Date.now();
+        const allTasksFlat: { task: KanbanTask; apiColId: string; key: string }[] = [];
+
         officialColumnsStructure.forEach((col) => {
           const rawTasks = data[col.id] || [];
           if (!Array.isArray(rawTasks)) return;
@@ -505,52 +537,100 @@ export default function App() {
             if (!task) return;
             const meta = getCollabMeta(task.assignee || "Não atribuído");
             const taskId = task.id ? String(task.id) : `${col.id}-task-${index}`;
-            allTasksFlat.push({
-              apiColId: col.id,
-              task: {
-                id: taskId,
-                title: task.title || "Sem ID",
-                ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-                cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-                uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-                material: task.material || task.description?.match(/Material[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-                quantidade: task.quantidade || task.description?.match(/Qtd?[a-z.]*[:\s]+([^\n|]+)/i)?.[1]?.trim() || task.description?.match(/Quantidade[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-                description: task.description || "",
-                assignee: task.assignee || "Não atribuído",
-                assigneeInitials: meta.initials,
-                assigneeColor: meta.color,
-                priority: "média",
-                dueDate: task.dueDate || "",
-                steps: [],
-                tags: Array.isArray(task.tags) ? task.tags : [],
-                checklist: [],
-                subtasks: [],
-                // Restaura anotações salvas localmente
-                annotations: savedAnnotations[taskId] ?? [],
-              },
-            });
+            const builtTask: KanbanTask = {
+              id: taskId,
+              title: task.title || "Sem ID",
+              ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              material: task.material || task.description?.match(/Material[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              quantidade: task.quantidade || task.description?.match(/Qtd?[a-z.]*[:\s]+([^\n|]+)/i)?.[1]?.trim() || task.description?.match(/Quantidade[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              description: task.description || "",
+              assignee: task.assignee || "Não atribuído",
+              assigneeInitials: meta.initials,
+              assigneeColor: meta.color,
+              priority: "média",
+              dueDate: task.dueDate || "",
+              steps: [],
+              tags: Array.isArray(task.tags) ? task.tags : [],
+              checklist: [],
+              subtasks: [],
+              annotations: [],
+            };
+            const key = getPersistKey(builtTask);
+            builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
+            allTasksFlat.push({ apiColId: col.id, task: builtTask, key });
           });
         });
 
-        // Distribui tarefas respeitando posição local salva
-        const builtColumns = officialColumnsStructure.map((col) => {
-          const tasks = allTasksFlat
-            .filter(({ task, apiColId }) => {
-              const localCol = savedColumns[task.id];
+        const liveTasks = allTasksFlat.filter(({ key }) => {
+          const ts = deleted[key];
+          return !(ts && now - ts < PENDING_TTL_MS);
+        });
+
+        const builtColumns: Column[] = officialColumnsStructure.map((col) => {
+          const tasks = liveTasks
+            .filter(({ apiColId, key }) => {
+              const localCol = savedColumns[key];
               return localCol ? localCol === col.id : apiColId === col.id;
             })
             .map(({ task }) => task);
           return { ...col, tasks };
         });
 
+        const remainingPending: typeof pending = {};
+        Object.entries(pending).forEach(([key, p]) => {
+          if (now - p.ts > PENDING_TTL_MS) return;
+          const present = liveTasks.find(t => t.key === key);
+          const alreadyInTargetCol = builtColumns
+            .find(c => c.id === p.columnId)
+            ?.tasks.some(t => getPersistKey(t) === key);
+
+          if (alreadyInTargetCol) return;
+
+          if (present) {
+            builtColumns.forEach(c => { c.tasks = c.tasks.filter(t => getPersistKey(t) !== key); });
+          }
+          const targetCol = builtColumns.find(c => c.id === p.columnId);
+          if (targetCol) {
+            const taskWithNotes = { ...p.task, annotations: savedAnnotations[key]?.length ? savedAnnotations[key] : p.task.annotations };
+            targetCol.tasks.push(taskWithNotes);
+          }
+          remainingPending[key] = p;
+        });
+        try { localStorage.setItem(LS_PENDING_KEY, JSON.stringify(remainingPending)); } catch {}
+
+        const remainingDeleted: Record<string, number> = {};
+        Object.entries(deleted).forEach(([key, ts]) => {
+          if (now - ts < PENDING_TTL_MS) remainingDeleted[key] = ts;
+        });
+        try { localStorage.setItem(LS_DELETED_KEY, JSON.stringify(remainingDeleted)); } catch {}
+
         setColumns(builtColumns);
+
+        // Se o modal estiver aberto, atualiza a referência dele para refletir dados do polling
+        setOpenTask(prev => {
+          if (!prev) return null;
+          for (const c of builtColumns) {
+            const found = c.tasks.find(t => t.id === prev.task.id);
+            if (found) return { task: found, columnId: c.id };
+          }
+          return prev;
+        });
       }
     } catch (error) {
       console.error("Erro ao ler API:", error);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  };
+  }, [officialColumnsStructure]);
+
+  useEffect(() => { loadKanban(); }, [loadKanban]);
+
+  useEffect(() => {
+    const interval = setInterval(() => loadKanban(true), POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [loadKanban]);
 
   const updateTask = (updated: KanbanTask) => {
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
@@ -563,21 +643,16 @@ export default function App() {
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId, assignee: newAssignee }) }).catch(() => {});
   };
 
-  // ── BUG FIX: Concluir tarefa com tratamento de erro e rollback ──
   const handleCompleteTask = async (columnId: string, taskId: string) => {
     let taskToMove: KanbanTask | null = null;
-
-    // 1. Captura a tarefa antes de mexer no estado
     const sourceCol = columns.find(c => c.id === columnId);
     if (sourceCol) {
       const found = sourceCol.tasks.find(t => t.id === taskId);
       if (found) taskToMove = { ...found, tags: ["Concluído"] };
     }
-
     if (!taskToMove) return;
 
-    // 2. Atualiza o estado otimisticamente (move o card na UI)
-    const prevColumns = columns; // salva snapshot para rollback
+    const prevColumns = columns;
     taskToMove = { ...taskToMove, previousColumnId: columnId };
     setColumns(prev => {
       const withoutTask = prev.map(col =>
@@ -591,32 +666,30 @@ export default function App() {
     showToast("Enviando para o Sheets...", "loading");
 
     try {
-      // 3. Faz o POST e aguarda a resposta
       const res = await fetch(API_URL, {
         method: "POST",
         body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: "concluido" }),
       });
-
-      // AppScript retorna sempre 200, precisamos checar o body
       const result = await res.json().catch(() => ({ status: "error", message: "Resposta inválida" }));
 
       if (result.status === "success") {
-        persistColumnPos(taskId, "concluido");
+        persistColumnPos(taskToMove!, "concluido");
         showToast("Tarefa concluída com sucesso!", "success");
       } else {
-        // 4. Se falhou, faz rollback do estado para não perder o card
         setColumns(prevColumns);
         showToast(`Erro ao concluir: ${result.message || "tente novamente"}`, "error");
       }
     } catch (err) {
-      // 5. Erro de rede — rollback
       setColumns(prevColumns);
       showToast("Erro de conexão. O card foi restaurado.", "error");
     }
   };
 
   const handleRemoveFromCompleted = async (columnId: string, taskId: string) => {
+    const sourceCol = columns.find(c => c.id === columnId);
+    const taskToDelete = sourceCol?.tasks.find(t => t.id === taskId);
     setColumns(prev => prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col));
+    if (taskToDelete) persistDeletion(taskToDelete);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId }) }).catch(() => {});
   };
 
@@ -640,7 +713,7 @@ export default function App() {
       );
     });
     showToast("Tarefa retornada!", "success");
-    persistColumnPos(taskId, targetColId);
+    persistColumnPos({ ...taskToReturn, previousColumnId: undefined }, targetColId);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToReturn, targetColumn: targetColId }) }).catch(() => {});
   };
 
@@ -672,7 +745,7 @@ export default function App() {
       );
     });
     showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
-    persistColumnPos(taskId, toColId);
+    persistColumnPos(taskToMove, toColId);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: toColId }) }).catch(() => {});
     setDragState(null);
     setDragOverCol(null);
@@ -689,10 +762,9 @@ export default function App() {
     })), [columns, filterAssignee, searchQuery]
   );
 
-  // IDs duplicados (title) considerando TODAS as colunas (sem filtro)
   const duplicateTitleSet = useMemo(() => {
     const count: Record<string, number> = {};
-    columns.forEach(col => col.tasks.forEach(t => { count[t.title] = (count[t.title] || 0) + 1; }));
+    columns.forEach(col => col.tasks.forEach(t => { if (t.title) count[t.title] = (count[t.title] || 0) + 1; }));
     return new Set(Object.entries(count).filter(([, n]) => n > 1).map(([k]) => k));
   }, [columns]);
 
@@ -703,7 +775,6 @@ export default function App() {
     { id: "configuracoes", label: "Configurações", icon: <Settings size={18} /> },
   ];
 
-  // Stats for header
   const totalTasks = columns.reduce((a, c) => a + c.tasks.length, 0);
   const concludedCount = columns.find(c => c.id === "concluido")?.tasks.length ?? 0;
 
@@ -725,10 +796,8 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: "#f1f5f9" }}>
-      {/* Toast */}
       {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
 
-      {/* Modal */}
       {openTask && (
         <TaskDetailModal
           task={openTask.task}
@@ -741,12 +810,10 @@ export default function App() {
         />
       )}
 
-      {/* Sidebar */}
       <aside
         className={`flex flex-col shrink-0 transition-all duration-300`}
         style={{ width: sidebarOpen ? 220 : 64, background: "#0f172a", borderRight: "1px solid rgba(255,255,255,0.06)" }}
       >
-        {/* Logo */}
         <div className="flex items-center gap-3 px-4 h-16 shrink-0" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
           <div className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0" style={{ background: "linear-gradient(135deg, #f97316, #4f46e5)" }}>
             <span className="text-white font-black text-xs">TLP</span>
@@ -759,7 +826,6 @@ export default function App() {
           )}
         </div>
 
-        {/* Nav */}
         <nav className="flex-1 py-4 space-y-0.5 overflow-y-auto px-2">
           {navItems.map(item => (
             <button
@@ -777,10 +843,9 @@ export default function App() {
           ))}
         </nav>
 
-        {/* Reload button */}
         <div className="px-2 pb-4">
           <button
-            onClick={() => loadKanban()}
+            onClick={() => { loadKanban(true); showToast("Atualizando quadro...", "loading"); setTimeout(() => showToast("Quadro updated!", "success"), 800); }}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all"
             style={{ color: "#475569" }}
             title="Recarregar"
@@ -791,9 +856,7 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Main */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Topbar */}
         <header className="h-16 shrink-0 flex items-center justify-between px-6 bg-white shadow-sm" style={{ borderBottom: "1px solid #e2e8f0" }}>
           <div className="flex items-center gap-4">
             <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-xl hover:bg-slate-100 text-slate-400 transition-colors">
@@ -808,7 +871,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Search */}
             <div className="relative">
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
@@ -819,7 +881,6 @@ export default function App() {
               />
             </div>
 
-            {/* Filter */}
             <div className="relative">
               <button
                 onClick={() => setFilterOpen(!filterOpen)}
@@ -847,12 +908,10 @@ export default function App() {
           </div>
         </header>
 
-        {/* Board */}
         <div className="flex-1 overflow-x-auto overflow-y-hidden">
           <div className="flex gap-4 h-full p-5 min-w-max">
             {filteredColumns.map(col => (
               <div key={col.id} className="flex flex-col w-72 shrink-0">
-                {/* Column header */}
                 <div className="flex items-center gap-2 mb-3 px-1">
                   <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: col.color }} />
                   <span className="text-sm font-black text-[#0f172a]">{col.title}</span>
@@ -861,7 +920,6 @@ export default function App() {
                   </span>
                 </div>
 
-                {/* Column body */}
                 <div
                   className="flex-1 overflow-y-auto space-y-3 pb-4 px-0.5 rounded-2xl transition-all"
                   style={{
@@ -898,11 +956,9 @@ export default function App() {
                         }}
                         onClick={() => setOpenTask({ task, columnId: col.id })}
                       >
-                        {/* Left accent bar */}
                         <div className="flex">
                           <div className="w-1 shrink-0 rounded-l-2xl" style={{ background: col.color }} />
                           <div className="flex-1 p-3.5">
-                            {/* Title row */}
                             <div className="flex items-center justify-between gap-2 mb-2.5">
                               <div className="flex items-center gap-1.5 min-w-0">
                                 <span className="text-sm font-black text-[#0f172a] truncate leading-tight">{task.title}</span>
@@ -918,7 +974,6 @@ export default function App() {
                               </span>
                             </div>
 
-                            {/* Info pills */}
                             <div className="space-y-1 mb-3">
                               <div className="flex items-center gap-1.5 text-xs">
                                 <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 w-10 shrink-0">Ionix</span>
@@ -936,7 +991,6 @@ export default function App() {
                               )}
                             </div>
 
-                            {/* Tags */}
                             {task.tags.length > 0 && (
                               <div className="flex flex-wrap gap-1 mb-3">
                                 {task.tags.map(tag => (
@@ -945,7 +999,6 @@ export default function App() {
                               </div>
                             )}
 
-                            {/* Footer */}
                             <div className="flex items-center justify-between pt-2.5" style={{ borderTop: "1px solid #f1f5f9" }}>
                               <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
                                 <div
