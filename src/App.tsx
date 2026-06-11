@@ -5,10 +5,10 @@ import {
   Tag, FileText, ClipboardList, MessageSquare, Circle, CheckCircle2,
   RefreshCw, AlertCircle, Zap
 } from "lucide-react";
-import { Realtime } from "ably";
+import { Realtime } from "ably"; // 🌟 Importação do Ably adicionada
 
 const API_URL = "https://script.google.com/macros/s/AKfycbwrNNlyRWYq5zayRYSlRfRSC_bFY7tjc4DXxL6TF3YSnHwMOw_h7HY2wF6qFW3MSQsXBQ/exec";
-// 🟢 Chave Root inserida com sucesso para atualização instantânea (< 1s)
+// 🟢 Chave Root inserida para atualização instantânea (< 1s)
 const ABLY_KEY = "BUp6Lg.QfvVuw:DBQaijX7rEyBdz4A1dXnrDXE68wWcCWkQTUG_BLSk9E"; 
 
 const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; 
@@ -16,7 +16,7 @@ const LS_COLUMNS_KEY     = "tlp_kanban_columns";
 const LS_PENDING_KEY     = "tlp_kanban_pending";     
 const LS_DELETED_KEY     = "tlp_kanban_deleted";     
 const PENDING_TTL_MS = 3 * 60 * 1000; 
-const POLL_INTERVAL_MS = 30 * 1000; // Reduzido para 30s pois o Ably cuida do tempo real
+const POLL_INTERVAL_MS = 30 * 1000; 
 
 const COLLABORATORS = [
   { name: "Camilly Silva",  initials: "CS", color: "#4f46e5" },
@@ -46,6 +46,7 @@ interface KanbanTask {
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
 function getPersistKey(task: Pick<KanbanTask, "id" | "title">): string {
+  if (task.title && task.title !== "Sem ID") return `t:${task.title}`;
   return `i:${task.id}`;
 }
 
@@ -92,6 +93,260 @@ function Toast({ message, type, onDismiss }: { message: string; type: "success" 
     <div className="fixed bottom-6 right-6 z-[100] flex items-center gap-2.5 px-4 py-3 rounded-2xl shadow-xl text-sm font-medium border" style={{ background: c.bg, borderColor: c.border, color: c.text, minWidth: 240 }}>
       {c.icon}
       <span className="flex-1">{message}</span>
+    </div>
+  );
+}
+
+function TaskDetailModal({
+  task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn,
+}: {
+  task: KanbanTask; columnId: string; onClose: () => void;
+  onUpdate: (u: KanbanTask) => void;
+  onComplete: (colId: string, taskId: string) => void;
+  onRemove: (colId: string, taskId: string) => void;
+  onReturn: (colId: string, taskId: string) => void;
+}) {
+  const [local, setLocal] = useState<KanbanTask>({ ...task });
+  const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes">("info");
+  const [newCheckItem, setNewCheckItem] = useState("");
+  const [newNote, setNewNote] = useState("");
+  const [newSubtask, setNewSubtask] = useState({ title: "", assignee: "", status: "pendente" as SubtaskStatus });
+  const [showSubtaskForm, setShowSubtaskForm] = useState(false);
+
+  const save = (updated: KanbanTask) => {
+    setLocal(updated);
+    onUpdate(updated);
+    try {
+      const stored = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}");
+      stored[getPersistKey(updated)] = updated.annotations;
+      localStorage.setItem(LS_ANNOTATIONS_KEY, JSON.stringify(stored));
+    } catch {}
+  };
+
+  const addCheckItem = () => {
+    if (!newCheckItem.trim()) return;
+    save({ ...local, checklist: [...local.checklist, { id: `chk-${Date.now()}`, label: newCheckItem.trim(), done: false }] });
+    setNewCheckItem("");
+  };
+  const toggleCheck = (id: string) => save({ ...local, checklist: local.checklist.map(c => c.id === id ? { ...c, done: !c.done } : c) });
+  const removeCheck = (id: string) => save({ ...local, checklist: local.checklist.filter(c => c.id !== id) });
+
+  const addSubtask = () => {
+    if (!newSubtask.title.trim()) return;
+    save({ ...local, subtasks: [...local.subtasks, { id: `sub-${Date.now()}`, ...newSubtask }] });
+    setNewSubtask({ title: "", assignee: "", status: "pendente" });
+    setShowSubtaskForm(false);
+  };
+  const updateSubtask = (id: string, patch: Partial<Subtask>) => save({ ...local, subtasks: local.subtasks.map(s => s.id === id ? { ...s, ...patch } : s) });
+  const removeSubtask = (id: string) => save({ ...local, subtasks: local.subtasks.filter(s => s.id !== id) });
+
+  const addNote = () => {
+    if (!newNote.trim()) return;
+    save({ ...local, annotations: [...local.annotations, { id: `ann-${Date.now()}`, text: newNote.trim(), createdAt: new Date().toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" }) }] });
+    setNewNote("");
+  };
+  const removeNote = (id: string) => save({ ...local, annotations: local.annotations.filter(a => a.id !== id) });
+
+  const cycleStep = (stepId: string) => {
+    const order: StepStatus[] = ["pendente", "em andamento", "concluído"];
+    save({ ...local, steps: local.steps.map(s => s.id !== stepId ? s : { ...s, status: order[(order.indexOf(s.status) + 1) % order.length] }) });
+  };
+
+  const prio = priorityBadge(local.priority);
+  const doneChecks = local.checklist.filter(c => c.done).length;
+  const tabs = [
+    { id: "info" as const,      label: "Detalhes",  icon: <FileText size={13} /> },
+    { id: "checklist" as const, label: `Checklist${local.checklist.length ? ` ${doneChecks}/${local.checklist.length}` : ""}`, icon: <ClipboardList size={13} /> },
+    { id: "subtasks" as const,  label: `Subtarefas${local.subtasks.length ? ` (${local.subtasks.length})` : ""}`, icon: <CheckCircle2 size={13} /> },
+    { id: "notes" as const,     label: `Notas${local.annotations.length ? ` (${local.annotations.length})` : ""}`, icon: <MessageSquare size={13} /> },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(10,16,36,0.6)", backdropFilter: "blur(6px)" }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="relative flex flex-col rounded-3xl shadow-2xl overflow-hidden" style={{ width: 700, maxHeight: "92vh", background: "#fff" }}>
+        <div className="h-1 w-full" style={{ background: "linear-gradient(90deg, #4f46e5, #7c3aed, #db2777)" }} />
+        <div className="flex items-start justify-between px-7 pt-5 pb-4 border-b border-gray-100">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="text-[10px] font-black uppercase tracking-widest text-[#6b7a99]">Tarefa</span>
+              <span className="flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: prio.bg, color: prio.text }}>
+                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: prio.dot }} /> {prio.label}
+              </span>
+            </div>
+            <h2 className="text-xl font-black text-[#0f172a] leading-tight">{local.title}</h2>
+          </div>
+          <div className="flex items-center gap-2 ml-4 shrink-0">
+            {columnId !== "concluido" ? (
+              <button onClick={() => { onComplete(columnId, task.id); onClose(); }} className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all" style={{ background: "linear-gradient(135deg, #10b981, #059669)" }}>
+                <CheckCircle size={14} /> Concluir tarefa
+              </button>
+            ) : (
+              <>
+                <button onClick={() => { onReturn(columnId, task.id); onClose(); }} className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all" style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}>
+                  <RefreshCw size={14} /> Retornar
+                </button>
+                <button onClick={() => { if (confirm("Deletar permanentemente dos concluídos?")) { onRemove(columnId, task.id); onClose(); } }} className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all" style={{ background: "linear-gradient(135deg, #ef4444, #dc2626)" }}>
+                  <Trash2 size={14} /> Remover
+                </button>
+              </>
+            )}
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-gray-100 text-[#6b7a99] transition-colors"><X size={17} /></button>
+          </div>
+        </div>
+
+        <div className="flex gap-0 px-7 border-b border-gray-100" style={{ background: "#fafafa" }}>
+          {tabs.map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className="flex items-center gap-1.5 px-3 py-3 text-xs font-bold transition-all border-b-2" style={{ borderColor: activeTab === tab.id ? "#4f46e5" : "transparent", color: activeTab === tab.id ? "#4f46e5" : "#94a3b8" }}>
+              {tab.icon}{tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-7 py-5">
+          {activeTab === "info" && (
+            <div className="space-y-5">
+              <div className="grid grid-cols-2 gap-2.5">
+                {[
+                  { icon: <Tag size={12} />,       label: "ID",          value: local.title },
+                  { icon: <Zap size={12} />,        label: "Ionix",       value: local.ionix || "—" },
+                  { icon: <LayoutGrid size={12} />, label: "Cluster",     value: local.cluster || "—" },
+                  { icon: <ChevronRight size={12} />,label: "UF",         value: local.uf || "—" },
+                  { icon: <FileText size={12} />,   label: "Material",    value: local.material || "—" },
+                  { icon: <ClipboardList size={12} />, label: "Quantidade", value: local.quantidade || "—" },
+                  { icon: <Calendar size={12} />,   label: "Vencimento",  value: local.dueDate || "—" },
+                ].map(row => (
+                  <div key={row.label} className="flex items-start gap-2.5 rounded-2xl px-3.5 py-3 border border-gray-100" style={{ background: "#f8fafc" }}>
+                    <span className="mt-0.5 text-indigo-400 shrink-0">{row.icon}</span>
+                    <div>
+                      <p className="text-[9px] font-black uppercase tracking-widest text-[#94a3b8] mb-0.5">{row.label}</p>
+                      <p className="text-sm font-bold text-[#0f172a]">{row.value}</p>
+                    </div>
+                  </div>
+                ))}
+                <div className="flex items-start gap-2.5 rounded-2xl px-3.5 py-3 border border-gray-100" style={{ background: "#f8fafc" }}>
+                  <User size={12} className="mt-0.5 text-indigo-400 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[9px] font-black uppercase tracking-widest text-[#94a3b8] mb-1">Colaborador</p>
+                    <select
+                      value={local.assignee}
+                      onChange={e => { const m = getCollabMeta(e.target.value); save({ ...local, assignee: e.target.value, assigneeInitials: m.initials, assigneeColor: m.color }); }}
+                      className="w-full text-sm font-bold text-[#0f172a] bg-transparent border-none focus:outline-none cursor-pointer"
+                    >
+                      <option value="Não atribuído">Não atribuído</option>
+                      {COLLABORATORS.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {local.tags.length > 0 && (
+                <div>
+                  <p className="text-[9px] font-black uppercase tracking-widest text-[#94a3b8] mb-2">Tags</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {local.tags.map(tag => (
+                      <span key={tag} className="text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-lg" style={{ background: "#fef3c7", color: "#92400e" }}>{tag}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {local.description && (
+                <div>
+                  <p className="text-[9px] font-black uppercase tracking-widest text-[#94a3b8] mb-2">Descrição</p>
+                  <p className="text-sm text-[#334155] rounded-2xl p-4 border border-gray-100 whitespace-pre-line leading-relaxed" style={{ background: "#f8fafc" }}>{local.description}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "checklist" && (
+            <div className="space-y-4">
+              {local.checklist.length > 0 && (
+                <>
+                  <div className="rounded-2xl p-3.5 border border-indigo-100" style={{ background: "#f5f3ff" }}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-indigo-700">Progresso</span>
+                      <span className="text-xs font-black text-indigo-700">{doneChecks}/{local.checklist.length}</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-indigo-100 overflow-hidden">
+                      <div className="h-full rounded-full transition-all" style={{ width: `${local.checklist.length ? (doneChecks / local.checklist.length) * 100 : 0}%`, background: "linear-gradient(90deg, #4f46e5, #7c3aed)" }} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    {local.checklist.map(item => (
+                      <div key={item.id} className="flex items-center gap-3 px-4 py-2.5 rounded-2xl border border-gray-100 group transition-all hover:border-indigo-100" style={{ background: item.done ? "#f0fdf4" : "#f8fafc" }}>
+                        <button onClick={() => toggleCheck(item.id)} className="shrink-0">
+                          {item.done ? <CheckCircle2 size={18} className="text-emerald-500" /> : <Circle size={18} className="text-gray-300 group-hover:text-indigo-300 transition-colors" />}
+                        </button>
+                        <span className={`flex-1 text-sm ${item.done ? "line-through text-gray-400" : "font-medium text-[#0f172a]"}`}>{item.label}</span>
+                        <button onClick={() => removeCheck(item.id)} className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-rose-500 transition-all"><Trash2 size={13} /></button>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+              <div className="flex gap-2">
+                <input value={newCheckItem} onChange={e => setNewCheckItem(e.target.value)} onKeyDown={e => e.key === "Enter" && addCheckItem()} placeholder="Nova atividade..." className="flex-1 text-sm px-4 py-2.5 rounded-xl border border-gray-200 bg-white focus:outline-none focus:border-indigo-300" />
+                <button onClick={addCheckItem} className="px-4 py-2.5 rounded-xl text-white transition-colors" style={{ background: "#4f46e5" }}><Plus size={16} /></button>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "subtasks" && (
+            <div className="space-y-4">
+              {local.subtasks.length > 0 && (
+                <div className="space-y-2">
+                  {local.subtasks.map(sub => (
+                    <div key={sub.id} className="flex items-center gap-3 px-4 py-2.5 rounded-2xl border border-gray-100 group" style={{ background: "#f8fafc" }}>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-bold text-[#0f172a] truncate">{sub.title}</p>
+                        <p className="text-xs text-[#94a3b8]">{sub.assignee || "Sem responsável"}</p>
+                      </div>
+                      <select value={sub.status} onChange={e => updateSubtask(sub.id, { status: e.target.value as SubtaskStatus })} className="text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-lg border-none cursor-pointer" style={{ background: sub.status === "concluído" ? "#d1fae5" : sub.status === "em andamento" ? "#fff7ed" : "#f1f5f9" }}>
+                        <option value="pendente">Pendente</option>
+                        <option value="em andamento">Em andamento</option>
+                        <option value="concluído">Concluído</option>
+                      </select>
+                      <button onClick={() => removeSubtask(sub.id)} className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-rose-500 transition-all"><Trash2 size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {showSubtaskForm ? (
+                <div className="space-y-2 rounded-2xl p-4 border border-indigo-100" style={{ background: "#f5f3ff" }}>
+                  <input value={newSubtask.title} onChange={e => setNewSubtask(s => ({ ...s, title: e.target.value }))} placeholder="Título da subtarefa..." className="w-full text-sm px-4 py-2.5 rounded-xl border border-indigo-200 focus:outline-none bg-white" />
+                  <div className="flex gap-2">
+                    <button onClick={addSubtask} className="flex-1 text-sm font-bold py-2.5 rounded-xl text-white" style={{ background: "#4f46e5" }}>Adicionar</button>
+                    <button onClick={() => setShowSubtaskForm(false)} className="px-4 py-2.5 rounded-xl border text-sm text-[#6b7a99]">Cancelar</button>
+                  </div>
+                </div>
+              ) : (
+                <button onClick={() => setShowSubtaskForm(true)} className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl border-2 border-dashed border-indigo-200 text-indigo-400 hover:bg-indigo-50 transition-colors"><Plus size={15} /> Nova subtarefa</button>
+              )}
+            </div>
+          )}
+
+          {activeTab === "notes" && (
+            <div className="space-y-4">
+              {local.annotations.length > 0 && (
+                <div className="space-y-2">
+                  {local.annotations.map(ann => (
+                    <div key={ann.id} className="relative rounded-2xl px-4 py-3.5 border border-amber-100 group" style={{ background: "#fffbeb" }}>
+                      <p className="text-sm text-[#0f172a] leading-relaxed">{ann.text}</p>
+                      <p className="text-[10px] text-amber-400 mt-1.5 font-medium">{ann.createdAt}</p>
+                      <button onClick={() => removeNote(ann.id)} className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 text-amber-300 hover:text-rose-500 transition-all"><Trash2 size={12} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex flex-col gap-2">
+                <textarea value={newNote} onChange={e => setNewNote(e.target.value)} placeholder="Escreva uma anotação..." rows={3} className="w-full text-sm px-4 py-3 rounded-2xl border border-gray-200 focus:outline-none focus:border-amber-300 resize-none" />
+                <button onClick={addNote} className="self-end flex items-center gap-2 text-sm font-bold px-5 py-2.5 rounded-xl text-white" style={{ background: "#d97706" }}><Plus size={14} /> Adicionar nota</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -167,11 +422,11 @@ export default function App() {
             const builtTask: KanbanTask = {
               id: taskId,
               title: task.title || "Sem ID",
-              ionix: task.ionix || "—",
-              cluster: task.cluster || "—",
-              uf: task.uf || "—",
-              material: task.material || "—",
-              quantidade: task.quantidade || "—",
+              ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              material: task.material || task.description?.match(/Material[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              quantidade: task.quantidade || task.description?.match(/Qtd?[a-z.]*[:\s]+([^\n|]+)/i)?.[1]?.trim() || task.description?.match(/Quantidade[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
               description: task.description || "",
               assignee: task.assignee || "Não atribuído",
               assigneeInitials: meta.initials,
@@ -194,7 +449,12 @@ export default function App() {
               const localCol = savedColumns[key];
               return localCol ? localCol === col.id : apiColId === col.id;
             })
-            .map(({ task }) => task);
+            .map(({ task }) => {
+              if (savedColumns[getPersistKey(task)] === "concluido" && !task.tags.includes("Concluído")) {
+                task.tags = [...task.tags, "Concluído"];
+              }
+              return task;
+            });
           return { ...col, tasks };
         });
 
@@ -216,7 +476,7 @@ export default function App() {
     }
   }, [officialColumnsStructure]);
 
-  // Escuta ativa do Ably: Faz a tela da chefe mexer em < 1 segundo
+  // 📡 Escuta ativa do Ably: Atualiza as duas telas na mesma hora!
   useEffect(() => {
     loadKanban();
     if (channel) {
@@ -249,6 +509,7 @@ export default function App() {
   const handleAssigneeChange = async (taskId: string, newAssignee: string) => {
     const meta = getCollabMeta(newAssignee);
     let updatedTask: KanbanTask | null = null;
+    
     setColumns(prev => prev.map(col => ({
       ...col,
       tasks: col.tasks.map(t => {
@@ -259,6 +520,7 @@ export default function App() {
         return t;
       })
     })));
+    
     if (updatedTask) broadcastChange("task_updated", { updatedTask });
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId, assignee: newAssignee }) }).catch(() => {});
   };
@@ -284,7 +546,11 @@ export default function App() {
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: "concluido" }) });
   };
 
-  // 🔥 RETORNAR CORRIGIDO: Limpa a tag de Concluído e joga de volta na hora certa
+  const handleRemoveFromCompleted = async (columnId: string, taskId: string) => {
+    setColumns(prev => prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col));
+    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId }) }).catch(() => {});
+  };
+
   const handleReturnTask = async (columnId: string, taskId: string) => {
     let taskToReturn: KanbanTask | null = null;
     const sourceCol = columns.find(c => c.id === columnId);
@@ -376,8 +642,7 @@ export default function App() {
             <span className="text-white font-black text-sm">TLP</span>
           </div>
           <div className="flex items-center gap-2 text-sm font-semibold text-slate-400">
-            <RefreshCw size={14} className="animate-spin text-indigo-400" />
-            Sincronizando com o Sheets...
+            <RefreshCw size={14} className="animate-spin text-indigo-400" /> Sincronizando com o Sheets...
           </div>
         </div>
       </div>
@@ -421,14 +686,19 @@ export default function App() {
             </button>
           ))}
         </nav>
+
+        <div className="px-2 pb-4">
+          <button onClick={() => { loadKanban(true); showToast("Atualizando quadro...", "loading"); setTimeout(() => showToast("Quadro atualizado!", "success"), 800); }} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all" style={{ color: "#475569" }} title="Recarregar">
+            <RefreshCw size={18} style={{ color: "#475569" }} />
+            {sidebarOpen && <span className="text-sm font-semibold">Atualizar</span>}
+          </button>
+        </div>
       </aside>
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <header className="h-16 shrink-0 flex items-center justify-between px-6 bg-white shadow-sm" style={{ borderBottom: "1px solid #e2e8f0" }}>
           <div className="flex items-center gap-4">
-            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-xl hover:bg-slate-100 text-slate-400 transition-colors">
-              <Menu size={18} />
-            </button>
+            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-xl hover:bg-slate-100 text-slate-400 transition-colors"><Menu size={18} /></button>
             <div>
               <h1 className="text-base font-black text-[#0f172a]">Quadro Kanban</h1>
               <p className="text-xs text-slate-400 font-medium">{totalTasks} cards · {concludedCount} concluídos</p>
@@ -443,16 +713,12 @@ export default function App() {
 
             <div className="relative">
               <button onClick={() => setFilterOpen(!filterOpen)} className="flex items-center gap-2 px-3 py-2 text-sm font-semibold border border-slate-200 rounded-xl bg-slate-50 text-slate-600 hover:border-indigo-300 transition-colors">
-                <Filter size={13} />
-                <span>{filterAssignee}</span>
-                <ChevronDown size={12} />
+                <Filter size={13} /> <span>{filterAssignee}</span> <ChevronDown size={12} />
               </button>
               {filterOpen && (
                 <div className="absolute right-0 top-full mt-1.5 bg-white border border-slate-100 rounded-2xl shadow-xl z-30 py-1.5 min-w-[170px]">
                   {["Todos", ...COLLABORATORS.map(c => c.name)].map(name => (
-                    <button key={name} onClick={() => { setFilterAssignee(name); setFilterOpen(false); }} className="w-full text-left px-4 py-2 text-sm font-medium hover:bg-slate-50 transition-colors" style={{ color: filterAssignee === name ? "#4f46e5" : "#334155" }}>
-                      {name}
-                    </button>
+                    <button key={name} onClick={() => { setFilterAssignee(name); setFilterOpen(false); }} className="w-full text-left px-4 py-2 text-sm font-medium hover:bg-slate-50 transition-colors" style={{ color: filterAssignee === name ? "#4f46e5" : "#334155" }}>{name}</button>
                   ))}
                 </div>
               )}
@@ -484,8 +750,7 @@ export default function App() {
                 >
                   {col.tasks.length === 0 && (
                     <div className="flex flex-col items-center justify-center py-10 rounded-2xl border-2 border-dashed border-slate-200 text-slate-300">
-                      <CheckCircle size={22} />
-                      <p className="text-xs font-semibold mt-2">Vazio</p>
+                      <CheckCircle size={22} /> <p className="text-xs font-semibold mt-2">Vazio</p>
                     </div>
                   )}
                   {col.tasks.map(task => {
@@ -512,13 +777,10 @@ export default function App() {
                             <div className="flex items-center justify-between gap-2 mb-2.5">
                               <div className="flex items-center gap-1.5 min-w-0">
                                 <span className="text-sm font-black text-[#0f172a] truncate leading-tight">{task.title}</span>
-                                {isDuplicate && (
-                                  <span className="shrink-0 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#b45309", border: "1px solid #f59e0b" }}>ID dup.</span>
-                                )}
+                                {isDuplicate && <span className="shrink-0 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#b45309", border: "1px solid #f59e0b" }}>ID dup.</span>}
                               </div>
                               <span className="flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded-full shrink-0" style={{ background: prio.bg, color: prio.text }}>
-                                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: prio.dot }} />
-                                {prio.label}
+                                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: prio.dot }} /> {prio.label}
                               </span>
                             </div>
 
@@ -531,13 +793,23 @@ export default function App() {
                                 <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 w-10 shrink-0">Cluster</span>
                                 <span className="font-bold text-slate-700 truncate text-[11px]">{task.cluster}</span>
                               </div>
+                              {task.quantidade && task.quantidade !== "—" && (
+                                <div className="flex items-center gap-1.5 text-xs">
+                                  <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 w-10 shrink-0">Qtd</span>
+                                  <span className="font-bold text-indigo-600 truncate text-[11px]">{task.quantidade}</span>
+                                </div>
+                              )}
                             </div>
+
+                            {task.tags.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mb-3">
+                                {task.tags.map(tag => <span key={tag} className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#92400e" }}>{tag}</span>)}
+                              </div>
+                            )}
 
                             <div className="flex items-center justify-between pt-2.5" style={{ borderTop: "1px solid #f1f5f9" }}>
                               <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
-                                <div className="w-6 h-6 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0 ring-2 ring-white" style={{ background: meta.color }} title={task.assignee}>
-                                  {meta.initials}
-                                </div>
+                                <div className="w-6 h-6 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0 ring-2 ring-white" style={{ background: meta.color }} title={task.assignee}>{meta.initials}</div>
                                 <select value={task.assignee} onChange={e => handleAssigneeChange(task.id, e.target.value)} className="text-[10px] font-semibold border-none bg-transparent text-slate-500 cursor-pointer focus:outline-none max-w-[90px]">
                                   <option value="Não atribuído">Sem perfil</option>
                                   {COLLABORATORS.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
@@ -546,19 +818,14 @@ export default function App() {
 
                               <div onClick={e => e.stopPropagation()}>
                                 {col.id !== "concluido" ? (
-                                  <button onClick={() => handleCompleteTask(col.id, task.id)} className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white" style={{ background: "linear-gradient(135deg, #10b981, #059669)" }}>
-                                    <CheckCircle size={11} /> Concluir
-                                  </button>
+                                  <button onClick={() => handleCompleteTask(col.id, task.id)} className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white" style={{ background: "linear-gradient(135deg, #10b981, #059669)" }}><CheckCircle size={11} /> Concluir</button>
                                 ) : (
                                   <div className="flex items-center gap-1.5">
-                                    <button onClick={() => handleReturnTask(col.id, task.id)} className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white" style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}>
-                                      <RefreshCw size={11} /> Retornar
-                                    </button>
+                                    <button onClick={() => handleReturnTask(col.id, task.id)} className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white" style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}><RefreshCw size={11} /> Retornar</button>
                                   </div>
                                 )}
                               </div>
                             </div>
-
                           </div>
                         </div>
                       </div>
@@ -573,5 +840,3 @@ export default function App() {
     </div>
   );
 }
-
-// Nota: A função TaskDetailModal permaneceu idêntica à do código anterior, operando perfeitamente com os novos gatilhos do Ably.
