@@ -7,12 +7,8 @@ import {
 } from "lucide-react";
 
 const API_URL = "https://script.google.com/macros/s/AKfycbwrNNlyRWYq5zayRYSlRfRSC_bFY7tjc4DXxL6TF3YSnHwMOw_h7HY2wF6qFW3MSQsXBQ/exec";
-const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; // { [persistKey]: Annotation[] }
-const LS_COLUMNS_KEY     = "tlp_kanban_columns";     // { [persistKey]: columnId }  — posição persistida
-const LS_PENDING_KEY     = "tlp_kanban_pending";     // { [persistKey]: { task, columnId, ts } } — movimentos ainda não confirmados pelo Sheets
-const LS_DELETED_KEY     = "tlp_kanban_deleted";     // { [persistKey]: ts } — exclusões ainda não confirmadas pelo Sheets
-const PENDING_TTL_MS = 3 * 60 * 1000; // 3 min — tempo de espera até o Sheets refletir a mudança
-const POLL_INTERVAL_MS = 12 * 1000;   // polling silencioso para sync entre usuários
+const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; // { [taskId]: Annotation[] }
+const LS_COLUMNS_KEY     = "tlp_kanban_columns";     // { [taskId]: columnId }  — posição persistida
 
 const COLLABORATORS = [
   { name: "Camilly Silva",  initials: "CS", color: "#4f46e5" },
@@ -42,15 +38,6 @@ interface KanbanTask {
 }
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
-
-// Chave estável para persistência local (anotações, posição, pendências).
-// Usa o título/ID de negócio (ex: "OS-12345") quando existir, pois o `id`
-// gerado a partir do índice da linha muda quando a tarefa troca de aba/coluna
-// no Sheets — era essa instabilidade que fazia notas e posição "sumirem".
-function getPersistKey(task: Pick<KanbanTask, "id" | "title">): string {
-  if (task.title && task.title !== "Sem ID") return `t:${task.title}`;
-  return `i:${task.id}`;
-}
 
 function getCollabMeta(name: string) {
   const found = COLLABORATORS.find(c => c.name.toLowerCase() === name.toLowerCase());
@@ -131,10 +118,9 @@ function TaskDetailModal({
     setLocal(updated);
     onUpdate(updated);
     // Persiste anotações no localStorage para sobreviver ao reload
-    // (chave estável: título/ID de negócio, não o id de linha que muda de aba)
     try {
       const stored = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}");
-      stored[getPersistKey(updated)] = updated.annotations;
+      stored[updated.id] = updated.annotations;
       localStorage.setItem(LS_ANNOTATIONS_KEY, JSON.stringify(stored));
     } catch {}
   };
@@ -488,66 +474,30 @@ export default function App() {
     { id: "concluido",   title: "Concluído",    color: "#10b981", accent: "#f0fdf4" },
   ], []);
 
-  const persistColumnPos = (task: KanbanTask, colId: string) => {
-    const key = getPersistKey(task);
+  useEffect(() => { loadKanban(); }, []);
+
+  const persistColumnPos = (taskId: string, colId: string) => {
     try {
       const stored = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY) || "{}");
-      stored[key] = colId;
+      stored[taskId] = colId;
       localStorage.setItem(LS_COLUMNS_KEY, JSON.stringify(stored));
     } catch {}
-    // Guarda um snapshot "pendente": enquanto o Sheets não confirmar a nova
-    // posição, continuamos exibindo a tarefa aqui mesmo que o polling traga
-    // o card ainda na coluna antiga.
-    try {
-      const pending = JSON.parse(localStorage.getItem(LS_PENDING_KEY) || "{}");
-      pending[key] = { task: { ...task, previousColumnId: undefined }, columnId: colId, ts: Date.now() };
-      localStorage.setItem(LS_PENDING_KEY, JSON.stringify(pending));
-    } catch {}
-    // Se a tarefa estava marcada como "excluída pendente", remove a marca —
-    // ela voltou a existir em alguma coluna.
-    try {
-      const deleted = JSON.parse(localStorage.getItem(LS_DELETED_KEY) || "{}");
-      if (deleted[key]) {
-        delete deleted[key];
-        localStorage.setItem(LS_DELETED_KEY, JSON.stringify(deleted));
-      }
-    } catch {}
   };
 
-  const persistDeletion = (task: KanbanTask) => {
-    const key = getPersistKey(task);
+  const loadKanban = async () => {
     try {
-      const deleted = JSON.parse(localStorage.getItem(LS_DELETED_KEY) || "{}");
-      deleted[key] = Date.now();
-      localStorage.setItem(LS_DELETED_KEY, JSON.stringify(deleted));
-    } catch {}
-    try {
-      const pending = JSON.parse(localStorage.getItem(LS_PENDING_KEY) || "{}");
-      delete pending[key];
-      localStorage.setItem(LS_PENDING_KEY, JSON.stringify(pending));
-    } catch {}
-  };
-
-  const loadKanban = useCallback(async (silent = false) => {
-    try {
-      if (!silent) setLoading(true);
+      setLoading(true);
       const response = await fetch(API_URL);
       const data = await response.json();
       if (data && typeof data === "object" && !Array.isArray(data)) {
-        // Recupera anotações, posições e pendências salvas localmente
+        // Recupera anotações e posições salvas localmente
         let savedAnnotations: Record<string, Annotation[]> = {};
         let savedColumns: Record<string, string> = {};
-        let pending: Record<string, { task: KanbanTask; columnId: string; ts: number }> = {};
-        let deleted: Record<string, number> = {};
         try { savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
         try { savedColumns    = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY)     || "{}"); } catch {}
-        try { pending         = JSON.parse(localStorage.getItem(LS_PENDING_KEY)     || "{}"); } catch {}
-        try { deleted         = JSON.parse(localStorage.getItem(LS_DELETED_KEY)     || "{}"); } catch {}
-
-        const now = Date.now();
 
         // Monta todas as tarefas flat primeiro para poder redistribuir por coluna local
-        const allTasksFlat: { task: KanbanTask; apiColId: string; key: string }[] = [];
+        const allTasksFlat: { task: KanbanTask; apiColId: string }[] = [];
         officialColumnsStructure.forEach((col) => {
           const rawTasks = data[col.id] || [];
           if (!Array.isArray(rawTasks)) return;
@@ -555,101 +505,52 @@ export default function App() {
             if (!task) return;
             const meta = getCollabMeta(task.assignee || "Não atribuído");
             const taskId = task.id ? String(task.id) : `${col.id}-task-${index}`;
-            const builtTask: KanbanTask = {
-              id: taskId,
-              title: task.title || "Sem ID",
-              ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-              cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-              uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-              material: task.material || task.description?.match(/Material[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-              quantidade: task.quantidade || task.description?.match(/Qtd?[a-z.]*[:\s]+([^\n|]+)/i)?.[1]?.trim() || task.description?.match(/Quantidade[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-              description: task.description || "",
-              assignee: task.assignee || "Não atribuído",
-              assigneeInitials: meta.initials,
-              assigneeColor: meta.color,
-              priority: "média",
-              dueDate: task.dueDate || "",
-              steps: [],
-              tags: Array.isArray(task.tags) ? task.tags : [],
-              checklist: [],
-              subtasks: [],
-              annotations: [],
-            };
-            const key = getPersistKey(builtTask);
-            // Restaura anotações: prioriza as salvas localmente (o Sheets
-            // normalmente não guarda esse campo), cai para o que vier da API.
-            builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
-            allTasksFlat.push({ apiColId: col.id, task: builtTask, key });
+            allTasksFlat.push({
+              apiColId: col.id,
+              task: {
+                id: taskId,
+                title: task.title || "Sem ID",
+                ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+                cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+                uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+                material: task.material || task.description?.match(/Material[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+                quantidade: task.quantidade || task.description?.match(/Qtd?[a-z.]*[:\s]+([^\n|]+)/i)?.[1]?.trim() || task.description?.match(/Quantidade[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+                description: task.description || "",
+                assignee: task.assignee || "Não atribuído",
+                assigneeInitials: meta.initials,
+                assigneeColor: meta.color,
+                priority: "média",
+                dueDate: task.dueDate || "",
+                steps: [],
+                tags: Array.isArray(task.tags) ? task.tags : [],
+                checklist: [],
+                subtasks: [],
+                // Restaura anotações salvas localmente
+                annotations: savedAnnotations[taskId] ?? [],
+              },
+            });
           });
         });
 
-        // Remove da lista quem está marcado como excluído recentemente
-        // (evita o card "ressuscitar" enquanto o Sheets ainda não processou a remoção)
-        const liveTasks = allTasksFlat.filter(({ key }) => {
-          const ts = deleted[key];
-          return !(ts && now - ts < PENDING_TTL_MS);
-        });
-
         // Distribui tarefas respeitando posição local salva
-        const builtColumns: Column[] = officialColumnsStructure.map((col) => {
-          const tasks = liveTasks
-            .filter(({ apiColId, key }) => {
-              const localCol = savedColumns[key];
+        const builtColumns = officialColumnsStructure.map((col) => {
+          const tasks = allTasksFlat
+            .filter(({ task, apiColId }) => {
+              const localCol = savedColumns[task.id];
               return localCol ? localCol === col.id : apiColId === col.id;
             })
             .map(({ task }) => task);
           return { ...col, tasks };
         });
 
-        // Sobrepõe pendências: tarefas movidas/concluídas/retornadas localmente
-        // que o Sheets ainda não refletiu na coluna esperada.
-        const remainingPending: typeof pending = {};
-        Object.entries(pending).forEach(([key, p]) => {
-          if (now - p.ts > PENDING_TTL_MS) return; // expira pendências antigas, evita acumular lixo
-          const present = liveTasks.find(t => t.key === key);
-          const alreadyInTargetCol = builtColumns
-            .find(c => c.id === p.columnId)
-            ?.tasks.some(t => getPersistKey(t) === key);
-
-          if (alreadyInTargetCol) return; // confirmado pelo Sheets, descarta a pendência
-
-          if (present) {
-            // A tarefa existe na resposta da API mas ainda numa coluna antiga:
-            // remove de onde está e injeta na coluna de destino.
-            builtColumns.forEach(c => { c.tasks = c.tasks.filter(t => getPersistKey(t) !== key); });
-          }
-          const targetCol = builtColumns.find(c => c.id === p.columnId);
-          if (targetCol) {
-            const taskWithNotes = { ...p.task, annotations: savedAnnotations[key]?.length ? savedAnnotations[key] : p.task.annotations };
-            targetCol.tasks.push(taskWithNotes);
-          }
-          remainingPending[key] = p;
-        });
-        try { localStorage.setItem(LS_PENDING_KEY, JSON.stringify(remainingPending)); } catch {}
-
-        // Limpa marcas de exclusão expiradas
-        const remainingDeleted: Record<string, number> = {};
-        Object.entries(deleted).forEach(([key, ts]) => {
-          if (now - ts < PENDING_TTL_MS) remainingDeleted[key] = ts;
-        });
-        try { localStorage.setItem(LS_DELETED_KEY, JSON.stringify(remainingDeleted)); } catch {}
-
         setColumns(builtColumns);
       }
     } catch (error) {
       console.error("Erro ao ler API:", error);
     } finally {
-      if (!silent) setLoading(false);
+      setLoading(false);
     }
-  }, [officialColumnsStructure]);
-
-  useEffect(() => { loadKanban(); }, [loadKanban]);
-
-  // Polling silencioso: outros usuários veem mudanças sem precisar dar refresh manual
-  useEffect(() => {
-    const interval = setInterval(() => loadKanban(true), POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [loadKanban]);
+  };
 
   const updateTask = (updated: KanbanTask) => {
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
@@ -700,7 +601,7 @@ export default function App() {
       const result = await res.json().catch(() => ({ status: "error", message: "Resposta inválida" }));
 
       if (result.status === "success") {
-        persistColumnPos(taskToMove!, "concluido");
+        persistColumnPos(taskId, "concluido");
         showToast("Tarefa concluída com sucesso!", "success");
       } else {
         // 4. Se falhou, faz rollback do estado para não perder o card
@@ -715,10 +616,7 @@ export default function App() {
   };
 
   const handleRemoveFromCompleted = async (columnId: string, taskId: string) => {
-    const sourceCol = columns.find(c => c.id === columnId);
-    const taskToDelete = sourceCol?.tasks.find(t => t.id === taskId);
     setColumns(prev => prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col));
-    if (taskToDelete) persistDeletion(taskToDelete);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId }) }).catch(() => {});
   };
 
@@ -742,7 +640,7 @@ export default function App() {
       );
     });
     showToast("Tarefa retornada!", "success");
-    persistColumnPos({ ...taskToReturn, previousColumnId: undefined }, targetColId);
+    persistColumnPos(taskId, targetColId);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToReturn, targetColumn: targetColId }) }).catch(() => {});
   };
 
@@ -774,7 +672,7 @@ export default function App() {
       );
     });
     showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
-    persistColumnPos(taskToMove, toColId);
+    persistColumnPos(taskId, toColId);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: toColId }) }).catch(() => {});
     setDragState(null);
     setDragOverCol(null);
@@ -882,7 +780,7 @@ export default function App() {
         {/* Reload button */}
         <div className="px-2 pb-4">
           <button
-            onClick={() => { loadKanban(true); showToast("Atualizando quadro...", "loading"); setTimeout(() => showToast("Quadro atualizado!", "success"), 800); }}
+            onClick={() => loadKanban()}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all"
             style={{ color: "#475569" }}
             title="Recarregar"
