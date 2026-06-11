@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { Realtime } from "ably";
 import {
   LayoutGrid, Users, BarChart3, Settings, Search, Filter, ChevronDown,
   Menu, CheckCircle, X, Plus, Trash2, ChevronRight, Calendar, User,
@@ -7,12 +8,17 @@ import {
 } from "lucide-react";
 
 const API_URL = "https://script.google.com/macros/s/AKfycbwrNNlyRWYq5zayRYSlRfRSC_bFY7tjc4DXxL6TF3YSnHwMOw_h7HY2wF6qFW3MSQsXBQ/exec";
-const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; // { [persistKey]: Annotation[] }
-const LS_COLUMNS_KEY     = "tlp_kanban_columns";     // { [persistKey]: columnId }  — posição persistida
-const LS_PENDING_KEY     = "tlp_kanban_pending";     // { [persistKey]: { task, columnId, ts } } — movimentos ainda não confirmados pelo Sheets
-const LS_DELETED_KEY     = "tlp_kanban_deleted";     // { [persistKey]: ts } — exclusões ainda não confirmadas pelo Sheets
-const PENDING_TTL_MS = 3 * 60 * 1000; // 3 min — tempo de espera até o Sheets refletir a mudança
-const POLL_INTERVAL_MS = 12 * 1000;   // polling silencioso para sync entre usuários
+
+// ─── CONFIGURAÇÃO DO ABLY ───
+// Cole aqui a sua API Key gerada no painel da Ably (ex: "xV3A.wA...:...")
+const ABLY_API_KEY = "BUp6Lg.QfvVuw:DBQaijX7rEyBdz4A1dXnrDXE68wWcCWkQTUG_BLSk9E"; 
+const ABLY_CHANNEL_NAME = "kanban-live";
+
+const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; 
+const LS_COLUMNS_KEY     = "tlp_kanban_columns";     
+const LS_PENDING_KEY     = "tlp_kanban_pending";     
+const LS_DELETED_KEY     = "tlp_kanban_deleted";     
+const PENDING_TTL_MS = 3 * 60 * 1000; 
 
 const COLLABORATORS = [
   { name: "Camilly Silva",  initials: "CS", color: "#4f46e5" },
@@ -33,17 +39,14 @@ interface Step { id: string; label: string; status: StepStatus; }
 
 interface KanbanTask {
   id: string; title: string; ionix: string; cluster: string; uf: string;
-  material: string;
-  quantidade: string;
-  description: string; assignee: string; assigneeInitials: string; assigneeColor: string;
-  priority: Priority; dueDate: string; steps: Step[]; tags: string[];
-  checklist: ChecklistItem[]; subtasks: Subtask[]; annotations: Annotation[];
-  previousColumnId?: string;
+  material: string; quantidade: string; description: string; assignee: string; 
+  assigneeInitials: string; assigneeColor: string; priority: Priority; dueDate: string; 
+  steps: Step[]; tags: string[]; checklist: ChecklistItem[]; subtasks: Subtask[]; 
+  annotations: Annotation[]; previousColumnId?: string;
 }
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
-// Chave estável para persistência local
 function getPersistKey(task: Pick<KanbanTask, "id" | "title">): string {
   if (task.title && task.title !== "Sem ID") return `t:${task.title}`;
   return `i:${task.id}`;
@@ -74,9 +77,6 @@ function stepStatusColor(s: StepStatus) {
   return "#d1d5db";
 }
 
-// ──────────────────────────────────────────
-// Toast notification
-// ──────────────────────────────────────────
 function Toast({ message, type, onDismiss }: { message: string; type: "success" | "error" | "loading"; onDismiss: () => void }) {
   useEffect(() => {
     if (type !== "loading") {
@@ -105,9 +105,6 @@ function Toast({ message, type, onDismiss }: { message: string; type: "success" 
   );
 }
 
-// ──────────────────────────────────────────
-// Task Detail Modal
-// ──────────────────────────────────────────
 function TaskDetailModal({
   task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn,
 }: {
@@ -403,7 +400,7 @@ function TaskDetailModal({
                   />
                   <div className="flex gap-2">
                     <button onClick={addSubtask} className="flex-1 text-sm font-bold py-2.5 rounded-xl text-white" style={{ background: "#4f46e5" }}>Adicionar</button>
-                    <button onClick={() => setShowSubtaskForm(false)} className="px-4 py-2.5 rounded-xl border text-sm text-[#6b7a99]">Cancelar</button>
+                    <button onClick={() => { setShowSubtaskForm(false); }} className="px-4 py-2.5 rounded-xl border text-sm text-[#6b7a99]">Cancelar</button>
                   </div>
                 </div>
               ) : (
@@ -449,9 +446,6 @@ function TaskDetailModal({
   );
 }
 
-// ──────────────────────────────────────────
-// Main App
-// ──────────────────────────────────────────
 export default function App() {
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
@@ -464,6 +458,8 @@ export default function App() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "loading" } | null>(null);
   const [dragState, setDragState] = useState<{ taskId: string; fromColId: string } | null>(null);
   const [dragOverCol, setDragOverCol] = useState<string | null>(null);
+
+  const ablyChannelRef = useRef<any>(null);
 
   const showToast = useCallback((message: string, type: "success" | "error" | "loading") => {
     setToast({ message, type });
@@ -532,7 +528,6 @@ export default function App() {
         const allTasksFlat: { task: KanbanTask; apiColId: string; key: string }[] = [];
 
         officialColumnsStructure.forEach((col) => {
-          // BUG FIX WINDOWS: Ignora se a aba vier como acaost, acaoST, AcaoSt, etc.
           const apiKey = Object.keys(data).find(k => k.toLowerCase() === col.id.toLowerCase()) || col.id;
           const rawTasks = data[apiKey] || [];
           
@@ -619,21 +614,89 @@ export default function App() {
     }
   }, [officialColumnsStructure]);
 
+  // Carga inicial do sistema
   useEffect(() => { loadKanban(); }, [loadKanban]);
 
+  // ─── INSTANCIAÇÃO E ESCUTA REALTIME (ABLY) ───
   useEffect(() => {
-    const interval = setInterval(() => loadKanban(true), POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [loadKanban]);
+    if (!ABLY_API_KEY || ABLY_API_KEY.includes("SUA_CHAVE_DO_ABLY")) {
+      console.warn("Ably não configurado. Por favor, insira uma API Key válida.");
+      return;
+    }
+
+    const ably = new Realtime({ key: ABLY_API_KEY });
+    const channel = ably.channels.get(ABLY_CHANNEL_NAME);
+    ablyChannelRef.current = channel;
+
+    // Escuta eventos disparados por outros usuários
+    channel.subscribe("taskMoved", (message) => {
+      const { taskId, fromColId, toColId, task } = message.data;
+      
+      setColumns(prev => {
+        const withoutTask = prev.map(col =>
+          col.id === fromColId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
+        );
+        // Evita duplicar se o card já existir localmente na coluna destino
+        return withoutTask.map(col => {
+          if (col.id === toColId) {
+            const exists = col.tasks.some(t => t.id === taskId);
+            return exists ? col : { ...col, tasks: [...col.tasks, task] };
+          }
+          return col;
+        });
+      });
+    });
+
+    channel.subscribe("taskUpdated", (message) => {
+      const { updatedTask } = message.data;
+      setColumns(prev => prev.map(col => ({
+        ...col,
+        tasks: col.tasks.map(t => t.id === updatedTask.id ? updatedTask : t)
+      })));
+    });
+
+    channel.subscribe("taskDeleted", (message) => {
+      const { taskId } = message.data;
+      setColumns(prev => prev.map(col => ({
+        ...col,
+        tasks: col.tasks.filter(t => t.id !== taskId)
+      })));
+    });
+
+    return () => {
+      channel.unsubscribe();
+      ably.close();
+    };
+  }, []);
 
   const updateTask = (updated: KanbanTask) => {
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
+    
+    // Alerta em tempo real via Ably
+    ablyChannelRef.current?.publish("taskUpdated", { updatedTask: updated });
+
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: updated }) }).catch(() => {});
   };
 
   const handleAssigneeChange = async (taskId: string, newAssignee: string) => {
     const meta = getCollabMeta(newAssignee);
-    setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === taskId ? { ...t, assignee: newAssignee, assigneeInitials: meta.initials, assigneeColor: meta.color } : t) })));
+    let updatedTask: KanbanTask | null = null;
+
+    setColumns(prev => prev.map(col => ({
+      ...col,
+      tasks: col.tasks.map(t => {
+        if (t.id === taskId) {
+          updatedTask = { ...t, assignee: newAssignee, assigneeInitials: meta.initials, assigneeColor: meta.color };
+          return updatedTask;
+        }
+        return t;
+      })
+    })));
+
+    if (updatedTask) {
+      ablyChannelRef.current?.publish("taskUpdated", { updatedTask });
+    }
+
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId, assignee: newAssignee }) }).catch(() => {});
   };
 
@@ -649,6 +712,7 @@ export default function App() {
 
     const prevColumns = columns;
     taskToMove = { ...taskToMove, previousColumnId: columnId };
+    
     setColumns(prev => {
       const withoutTask = prev.map(col =>
         col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
@@ -657,6 +721,8 @@ export default function App() {
         col.id === "concluido" ? { ...col, tasks: [...col.tasks, taskToMove!] } : col
       );
     });
+
+    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: "concluido", task: taskToMove });
 
     showToast("Enviando para o Sheets...", "loading");
 
@@ -684,7 +750,11 @@ export default function App() {
   const handleRemoveFromCompleted = async (columnId: string, taskId: string) => {
     const sourceCol = columns.find(c => c.id === columnId);
     const taskToDelete = sourceCol?.tasks.find(t => t.id === taskId);
+    
     setColumns(prev => prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col));
+    
+    ablyChannelRef.current?.publish("taskDeleted", { taskId });
+
     if (taskToDelete) persistDeletion(taskToDelete);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId }) }).catch(() => {});
   };
@@ -699,17 +769,21 @@ export default function App() {
     if (!taskToReturn) return;
 
     const targetColId = taskToReturn.previousColumnId || "semservico";
-    const prevColumns = columns;
+    const finalTask = { ...taskToReturn, previousColumnId: undefined };
+
     setColumns(prev => {
       const withoutTask = prev.map(col =>
         col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
       );
       return withoutTask.map(col =>
-        col.id === targetColId ? { ...col, tasks: [...col.tasks, { ...taskToReturn!, previousColumnId: undefined }] } : col
+        col.id === targetColId ? { ...col, tasks: [...col.tasks, finalTask] } : col
       );
     });
+
+    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: targetColId, task: finalTask });
+
     showToast("Tarefa retornada!", "success");
-    persistColumnPos({ ...taskToReturn, previousColumnId: undefined }, targetColId);
+    persistColumnPos(finalTask, targetColId);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToReturn, targetColumn: targetColId }) }).catch(() => {});
   };
 
@@ -740,10 +814,13 @@ export default function App() {
         col.id === toColId ? { ...col, tasks: [...col.tasks, taskToMove!] } : col
       );
     });
+
+    // Envia o movimento instantaneamente para o Ably
+    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId, toColId, task: taskToMove });
+
     showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
     persistColumnPos(taskToMove, toColId);
 
-    // BUG FIX WINDOWS: Altera a action para criar linha se o destino for acaost
     const apiAction = toColId === "acaost" ? "createActionST" : "updateTask";
 
     fetch(API_URL, { 
@@ -755,11 +832,6 @@ export default function App() {
       }) 
     })
     .then(res => res.json())
-    .then(result => {
-      if (result.status === "success") {
-        loadKanban(true); // Recarrega silenciosamente para alinhar os dados
-      }
-    })
     .catch(() => {});
 
     setDragState(null);
@@ -802,7 +874,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2 text-sm font-semibold text-slate-400">
             <RefreshCw size={14} className="animate-spin text-indigo-400" />
-            Sincronizando com o Sheets...
+            Carregando do Sheets...
           </div>
         </div>
       </div>
@@ -860,13 +932,13 @@ export default function App() {
 
         <div className="px-2 pb-4">
           <button
-            onClick={() => { loadKanban(true); showToast("Atualizando quadro...", "loading"); setTimeout(() => showToast("Quadro atualizado!", "success"), 800); }}
+            onClick={() => { loadKanban(); showToast("Forçando recarga completa...", "loading"); setTimeout(() => showToast("Quadro atualizado!", "success"), 800); }}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all"
             style={{ color: "#475569" }}
-            title="Recarregar"
+            title="Recarregar tudo manualmente"
           >
             <RefreshCw size={18} style={{ color: "#475569" }} />
-            {sidebarOpen && <span className="text-sm font-semibold">Atualizar</span>}
+            {sidebarOpen && <span className="text-sm font-semibold">Forçar Recarga</span>}
           </button>
         </div>
       </aside>
@@ -878,7 +950,7 @@ export default function App() {
               <Menu size={18} />
             </button>
             <div>
-              <h1 className="text-base font-black text-[#0f172a]">Quadro Kanban</h1>
+              <h1 className="text-base font-black text-[#0f172a]">Quadro Live (Ably)</h1>
               <p className="text-xs text-slate-400 font-medium">
                 {totalTasks} cards · {concludedCount} concluídos
               </p>
