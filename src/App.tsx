@@ -46,8 +46,8 @@ interface KanbanTask {
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
+// CORREÇÃO: Identifica cada card individualmente pelo ID gerado, não mais pelo título repetido
 function getPersistKey(task: Pick<KanbanTask, "id" | "title">): string {
-  if (task.title && task.title !== "Sem ID") return `t:${task.title}`;
   return `i:${task.id}`;
 }
 
@@ -114,7 +114,7 @@ function TaskDetailModal({
   onReturn: (colId: string, taskId: string) => void;
 }) {
   const [local, setLocal] = useState<KanbanTask>({ ...task });
-  const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes" >("info");
+  const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes">("info");
   const [newCheckItem, setNewCheckItem] = useState("");
   const [newNote, setNewNote] = useState("");
   const [newSubtask, setNewSubtask] = useState({ title: "", assignee: "", status: "pendente" as SubtaskStatus });
@@ -446,16 +446,7 @@ function TaskDetailModal({
 }
 
 export default function App() {
-  const officialColumnsStructure = useMemo(() => [
-    { id: "semservico",  title: "Sem Serviço",  color: "#ef4444", accent: "#fee2e2" },
-    { id: "materiaiscl", title: "Materiais CL", color: "#84cc16", accent: "#f7fee7" },
-    { id: "acaost",      title: "Ação ST",      color: "#3b82f6", accent: "#eff6ff" },
-    { id: "concluido",   title: "Concluído",    color: "#10b981", accent: "#f0fdf4" },
-  ], []);
-
-  const [columns, setColumns] = useState<Column[]>(() => 
-    officialColumnsStructure.map(col => ({ ...col, tasks: [] }))
-  );
+  const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterAssignee, setFilterAssignee] = useState<string>("Todos");
   const [searchQuery, setSearchQuery] = useState("");
@@ -468,13 +459,19 @@ export default function App() {
   const [dragOverCol, setDragOverCol] = useState<string | null>(null);
 
   const ablyChannelRef = useRef<any>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
 
   const showToast = useCallback((message: string, type: "success" | "error" | "loading") => {
     setToast({ message, type });
   }, []);
 
   const dismissToast = useCallback(() => setToast(null), []);
+
+  const officialColumnsStructure = useMemo(() => [
+    { id: "semservico",  title: "Sem Serviço",  color: "#ef4444", accent: "#fee2e2" },
+    { id: "materiaiscl", title: "Materiais CL", color: "#84cc16", accent: "#f7fee7" },
+    { id: "acaost",      title: "Ação ST",      color: "#3b82f6", accent: "#eff6ff" },
+    { id: "concluido",   title: "Concluído",    color: "#10b981", accent: "#f0fdf4" },
+  ], []);
 
   const persistColumnPos = (task: KanbanTask, colId: string) => {
     const key = getPersistKey(task);
@@ -512,185 +509,167 @@ export default function App() {
   };
 
   const loadKanban = useCallback(async (silent = false) => {
-    // PROTEÇÃO CHROME: Cancela qualquer fetch que já estivesse a correr para não sobrecarregar
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    abortControllerRef.current = new AbortController();
-
     try {
       if (!silent) setLoading(true);
-      const response = await fetch(API_URL, { signal: abortControllerRef.current.signal });
-      
-      if (!response.ok) throw new Error("Falha na resposta do servidor");
+      const response = await fetch(API_URL);
       const data = await response.json();
-      
-      if (!data || typeof data !== "object" || Array.isArray(data)) {
-        throw new Error("Formato inválido");
-      }
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        let savedAnnotations: Record<string, Annotation[]> = {};
+        let savedColumns: Record<string, string> = {};
+        let pending: Record<string, { task: KanbanTask; columnId: string; ts: number }> = {};
+        let deleted: Record<string, number> = {};
+        try { savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
+        try { savedColumns    = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY)     || "{}"); } catch {}
+        try { pending         = JSON.parse(localStorage.getItem(LS_PENDING_KEY)     || "{}"); } catch {}
+        try { deleted         = JSON.parse(localStorage.getItem(LS_DELETED_KEY)     || "{}"); } catch {}
 
-      let savedAnnotations: Record<string, Annotation[]> = {};
-      let savedColumns: Record<string, string> = {};
-      let pending: Record<string, { task: KanbanTask; columnId: string; ts: number }> = {};
-      let deleted: Record<string, number> = {};
-      
-      try { savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
-      try { savedColumns    = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY)     || "{}"); } catch {}
-      try { pending         = JSON.parse(localStorage.getItem(LS_PENDING_KEY)     || "{}"); } catch {}
-      try { deleted         = JSON.parse(localStorage.getItem(LS_DELETED_KEY)     || "{}"); } catch {}
+        const now = Date.now();
+        const allTasksFlat: { task: KanbanTask; apiColId: string; key: string }[] = [];
 
-      const now = Date.now();
-      const allTasksFlat: { task: KanbanTask; apiColId: string; key: string }[] = [];
+        officialColumnsStructure.forEach((col) => {
+          const apiKey = Object.keys(data).find(k => k.toLowerCase() === col.id.toLowerCase()) || col.id;
+          const rawTasks = data[apiKey] || [];
+          
+          if (!Array.isArray(rawTasks)) return;
+          rawTasks.forEach((task: any, index: number) => {
+            if (!task) return;
+            
+            const taskTitle = task.title ? String(task.title).trim() : "Sem ID";
+            const taskId = task.id ? String(task.id) : `${col.id}-task-${index}`;
 
-      officialColumnsStructure.forEach((col) => {
-        const apiKey = Object.keys(data).find(k => k.toLowerCase() === col.id.toLowerCase()) || col.id;
-        const rawTasks = data[apiKey] || [];
-        
-        if (!Array.isArray(rawTasks)) return;
-        rawTasks.forEach((task: any, index: number) => {
-          if (!task) return;
-          const meta = getCollabMeta(task.assignee || "Não atribuído");
-          const taskId = task.id ? String(task.id) : `${col.id}-task-${index}`;
-          const builtTask: KanbanTask = {
-            id: taskId,
-            title: task.title || "Sem ID",
-            ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-            cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-            uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-            material: task.material || task.description?.match(/Material[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-            quantidade: task.quantidade || task.description?.match(/Qtd?[a-z.]*[:\s]+([^\n|]+)/i)?.[1]?.trim() || task.description?.match(/Quantidade[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
-            description: task.description || "",
-            assignee: task.assignee || "Não atribuído",
-            assigneeInitials: meta.initials,
-            assigneeColor: meta.color,
-            priority: "média",
-            dueDate: task.dueDate || "",
-            steps: [],
-            tags: Array.isArray(task.tags) ? task.tags : [],
-            checklist: [],
-            subtasks: [],
-            annotations: [],
-          };
-          const key = getPersistKey(builtTask);
-          builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
-          allTasksFlat.push({ apiColId: col.id, task: builtTask, key });
+            const meta = getCollabMeta(task.assignee || "Não atribuído");
+            const builtTask: KanbanTask = {
+              id: taskId,
+              title: taskTitle,
+              ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              material: task.material || task.description?.match(/Material[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              quantidade: task.quantidade || task.description?.match(/Qtd?[a-z.]*[:\s]+([^\n|]+)/i)?.[1]?.trim() || task.description?.match(/Quantidade[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+              description: task.description || "",
+              assignee: task.assignee || "Não atribuído",
+              assigneeInitials: meta.initials,
+              assigneeColor: meta.color,
+              priority: "média",
+              dueDate: task.dueDate || "",
+              steps: [],
+              tags: Array.isArray(task.tags) ? task.tags : [],
+              checklist: [],
+              subtasks: [],
+              annotations: [],
+            };
+            const key = getPersistKey(builtTask);
+            builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
+            allTasksFlat.push({ apiColId: col.id, task: builtTask, key });
+          });
         });
-      });
 
-      const liveTasks = allTasksFlat.filter(({ key }) => {
-        const ts = deleted[key];
-        return !(ts && now - ts < PENDING_TTL_MS);
-      });
+        const liveTasks = allTasksFlat.filter(({ key }) => {
+          const ts = deleted[key];
+          return !(ts && now - ts < PENDING_TTL_MS);
+        });
 
-      const builtColumns: Column[] = officialColumnsStructure.map((col) => {
-        const tasks = liveTasks
-          .filter(({ apiColId, key }) => {
-            const localCol = savedColumns[key];
-            return localCol ? localCol === col.id : apiColId === col.id;
-          })
-          .map(({ task }) => task);
-        return { ...col, tasks };
-      });
+        const builtColumns: Column[] = officialColumnsStructure.map((col) => {
+          const tasks = liveTasks
+            .filter(({ apiColId, key }) => {
+              const localCol = savedColumns[key];
+              return localCol ? localCol === col.id : apiColId === col.id;
+            })
+            .map(({ task }) => task);
+          return { ...col, tasks };
+        });
 
-      const remainingPending: typeof pending = {};
-      Object.entries(pending).forEach(([key, p]) => {
-        if (now - p.ts > PENDING_TTL_MS) return;
-        const present = liveTasks.find(t => t.key === key);
-        const alreadyInTargetCol = builtColumns
-          .find(c => c.id === p.columnId)
-          ?.tasks.some(t => getPersistKey(t) === key);
+        const remainingPending: typeof pending = {};
+        Object.entries(pending).forEach(([key, p]) => {
+          if (now - p.ts > PENDING_TTL_MS) return;
+          const present = liveTasks.find(t => t.key === key);
+          const alreadyInTargetCol = builtColumns
+            .find(c => c.id === p.columnId)
+            ?.tasks.some(t => getPersistKey(t) === key);
 
-        if (alreadyInTargetCol) return;
+          if (alreadyInTargetCol) return;
 
-        if (present) {
-          builtColumns.forEach(c => { c.tasks = c.tasks.filter(t => getPersistKey(t) !== key); });
-        }
-        const targetCol = builtColumns.find(c => c.id === p.columnId);
-        if (targetCol) {
-          const taskWithNotes = { ...p.task, annotations: savedAnnotations[key]?.length ? savedAnnotations[key] : p.task.annotations };
-          targetCol.tasks.push(taskWithNotes);
-        }
-        remainingPending[key] = p;
-      });
-      try { localStorage.setItem(LS_PENDING_KEY, JSON.stringify(remainingPending)); } catch {}
+          if (present) {
+            builtColumns.forEach(c => { c.tasks = c.tasks.filter(t => getPersistKey(t) !== key); });
+          }
+          const targetCol = builtColumns.find(c => c.id === p.columnId);
+          if (targetCol) {
+            const taskWithNotes = { ...p.task, annotations: savedAnnotations[key]?.length ? savedAnnotations[key] : p.task.annotations };
+            targetCol.tasks.push(taskWithNotes);
+          }
+          remainingPending[key] = p;
+        });
+        try { localStorage.setItem(LS_PENDING_KEY, JSON.stringify(remainingPending)); } catch {}
 
-      const remainingDeleted: Record<string, number> = {};
-      Object.entries(deleted).forEach(([key, ts]) => {
-        if (now - ts < PENDING_TTL_MS) remainingDeleted[key] = ts;
-      });
-      try { localStorage.setItem(LS_DELETED_KEY, JSON.stringify(remainingDeleted)); } catch {}
+        const remainingDeleted: Record<string, number> = {};
+        Object.entries(deleted).forEach(([key, ts]) => {
+          if (now - ts < PENDING_TTL_MS) remainingDeleted[key] = ts;
+        });
+        try { localStorage.setItem(LS_DELETED_KEY, JSON.stringify(remainingDeleted)); } catch {}
 
-      setColumns(builtColumns);
-    } catch (error: any) {
-      if (error.name === "AbortError") return; // Ignora o cancelamento intencional
-      console.error("Erro ao processar Kanban:", error);
+        setColumns(builtColumns);
+      }
+    } catch (error) {
+      console.error("Erro ao ler API:", error);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [officialColumnsStructure]);
 
+  useEffect(() => { loadKanban(); }, [loadKanban]);
+
   useEffect(() => {
-    loadKanban();
-    return () => {
-      if (abortControllerRef.current) abortControllerRef.current.abort();
-    };
-  }, [loadKanban]);
-
-  // ─── INSTANCIAÇÃO E ESCUTA REALTIME (ABLY COM PROTEÇÃO CHROME) ───
-  useEffect(() => {
-    if (!ABLY_API_KEY || ABLY_API_KEY.includes("SUA_CHAVE_DO_ABLY")) return;
-
-    let ably: Realtime | null = null;
-    try {
-      ably = new Realtime({ key: ABLY_API_KEY });
-      const channel = ably.channels.get(ABLY_CHANNEL_NAME);
-      ablyChannelRef.current = channel;
-
-      channel.subscribe("taskMoved", (message) => {
-        const { taskId, fromColId, toColId, task } = message.data;
-        setColumns(prev => {
-          const withoutTask = prev.map(col =>
-            col.id === fromColId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
-          );
-          return withoutTask.map(col => {
-            if (col.id === toColId) {
-              const exists = col.tasks.some(t => t.id === taskId);
-              return exists ? col : { ...col, tasks: [...col.tasks, task] };
-            }
-            return col;
-          });
-        });
-      });
-
-      channel.subscribe("taskUpdated", (message) => {
-        const { updatedTask } = message.data;
-        setColumns(prev => prev.map(col => ({
-          ...col,
-          tasks: col.tasks.map(t => t.id === updatedTask.id ? updatedTask : t)
-        })));
-      });
-
-      channel.subscribe("taskDeleted", (message) => {
-        const { taskId } = message.data;
-        setColumns(prev => prev.map(col => ({
-          ...col,
-          tasks: col.tasks.filter(t => t.id !== taskId)
-        })));
-      });
-    } catch (e) {
-      console.warn("Ably não conseguiu ligar nesta sessão do Chrome. A rodar modo offline local.");
+    if (!ABLY_API_KEY || ABLY_API_KEY.includes("SUA_CHAVE_DO_ABLY")) {
+      console.warn("Ably não configurado. Por favor, insira uma API Key válida.");
+      return;
     }
 
+    const ably = new Realtime({ key: ABLY_API_KEY });
+    const channel = ably.channels.get(ABLY_CHANNEL_NAME);
+    ablyChannelRef.current = channel;
+
+    channel.subscribe("taskMoved", (message) => {
+      const { taskId, fromColId, toColId, task } = message.data;
+      
+      setColumns(prev => {
+        const withoutTask = prev.map(col =>
+          col.id === fromColId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
+        );
+        return withoutTask.map(col => {
+          if (col.id === toColId) {
+            const exists = col.tasks.some(t => t.id === taskId);
+            return exists ? col : { ...col, tasks: [...col.tasks, task] };
+          }
+          return col;
+        });
+      });
+    });
+
+    channel.subscribe("taskUpdated", (message) => {
+      const { updatedTask } = message.data;
+      setColumns(prev => prev.map(col => ({
+        ...col,
+        tasks: col.tasks.map(t => t.id === updatedTask.id ? updatedTask : t)
+      })));
+    });
+
+    channel.subscribe("taskDeleted", (message) => {
+      const { taskId } = message.data;
+      setColumns(prev => prev.map(col => ({
+        ...col,
+        tasks: col.tasks.filter(t => t.id !== taskId)
+      })));
+    });
+
     return () => {
-      if (ably) {
-        try { ably.close(); } catch {}
-      }
+      channel.unsubscribe();
+      ably.close();
     };
   }, []);
 
   const updateTask = (updated: KanbanTask) => {
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
-    try { ablyChannelRef.current?.publish("taskUpdated", { updatedTask: updated }); } catch {}
+    ablyChannelRef.current?.publish("taskUpdated", { updatedTask: updated });
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: updated }) }).catch(() => {});
   };
 
@@ -710,9 +689,8 @@ export default function App() {
     })));
 
     if (updatedTask) {
-      try { ablyChannelRef.current?.publish("taskUpdated", { updatedTask }); } catch {}
+      ablyChannelRef.current?.publish("taskUpdated", { updatedTask });
     }
-
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId, assignee: newAssignee }) }).catch(() => {});
   };
 
@@ -738,8 +716,8 @@ export default function App() {
       );
     });
 
-    try { ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: "concluido", task: taskToMove }); } catch {}
-    showToast("A atualizar folha de cálculo...", "loading");
+    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: "concluido", task: taskToMove });
+    showToast("Enviando para o Sheets...", "loading");
 
     try {
       const res = await fetch(API_URL, {
@@ -758,7 +736,7 @@ export default function App() {
       }
     } catch (err) {
       setColumns(prevColumns);
-      showToast("Erro de ligação. O card foi restaurado.", "error");
+      showToast("Erro de conexão. O card foi restaurado.", "error");
     }
   };
 
@@ -767,7 +745,7 @@ export default function App() {
     const taskToDelete = sourceCol?.tasks.find(t => t.id === taskId);
     
     setColumns(prev => prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col));
-    try { ablyChannelRef.current?.publish("taskDeleted", { taskId }); } catch {}
+    ablyChannelRef.current?.publish("taskDeleted", { taskId });
 
     if (taskToDelete) persistDeletion(taskToDelete);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId }) }).catch(() => {});
@@ -794,7 +772,7 @@ export default function App() {
       );
     });
 
-    try { ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: targetColId, task: finalTask }); } catch {}
+    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId: columnId, toColId: targetColId, task: finalTask });
     showToast("Tarefa retornada!", "success");
     persistColumnPos(finalTask, targetColId);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToReturn, targetColumn: targetColId }) }).catch(() => {});
@@ -828,20 +806,15 @@ export default function App() {
       );
     });
 
-    try { ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId, toColId, task: taskToMove }); } catch {}
+    ablyChannelRef.current?.publish("taskMoved", { taskId, fromColId, toColId, task: taskToMove });
     showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
     persistColumnPos(taskToMove, toColId);
 
     const apiAction = toColId === "acaost" ? "createActionST" : "updateTask";
-
     fetch(API_URL, { 
       method: "POST", 
-      body: JSON.stringify({ 
-        action: apiAction, 
-        task: taskToMove, 
-        targetColumn: toColId 
-      }) 
-    }).catch(() => {});
+      body: JSON.stringify({ action: apiAction, task: taskToMove, targetColumn: toColId }) 
+    }).then(res => res.json()).catch(() => {});
 
     setDragState(null);
     setDragOverCol(null);
@@ -852,19 +825,23 @@ export default function App() {
       ...col,
       tasks: Array.isArray(col.tasks) ? col.tasks.filter(t => {
         const matchesAssignee = filterAssignee === "Todos" || t.assignee === filterAssignee;
-        const q = searchQuery.toLowerCase();
-        return matchesAssignee && (!q || t.title?.toLowerCase().includes(q) || t.ionix?.toLowerCase().includes(q) || t.cluster?.toLowerCase().includes(q) || t.description?.toLowerCase().includes(q));
+        
+        const q = searchQuery.trim().toLowerCase();
+        const matchesSearch = !q || 
+          String(t.title).toLowerCase().includes(q) || 
+          String(t.ionix).toLowerCase().includes(q) || 
+          String(t.cluster).toLowerCase().includes(q) || 
+          String(t.description).toLowerCase().includes(q);
+
+        return matchesAssignee && matchesSearch;
       }) : [],
     })), [columns, filterAssignee, searchQuery]
   );
 
+  // Monitora apenas itens duplicados na MESMA exibição visual para fins estéticos (borda amarela) se necessário
   const duplicateTitleSet = useMemo(() => {
     const count: Record<string, number> = {};
-    columns.forEach(col => {
-      if (Array.isArray(col.tasks)) {
-        col.tasks.forEach(t => { count[t.title] = (count[t.title] || 0) + 1; });
-      }
-    });
+    columns.forEach(col => col.tasks.forEach(t => { count[t.title] = (count[t.title] || 0) + 1; }));
     return new Set(Object.entries(count).filter(([, n]) => n > 1).map(([k]) => k));
   }, [columns]);
 
@@ -875,8 +852,8 @@ export default function App() {
     { id: "configuracoes", label: "Configurações", icon: <Settings size={18} /> },
   ];
 
-  const totalTasks = columns.reduce((a, c) => a + (c.tasks?.length || 0), 0);
-  const concludedCount = columns.find(c => c.id === "concluido")?.tasks?.length ?? 0;
+  const totalTasks = columns.reduce((a, c) => a + c.tasks.length, 0);
+  const concludedCount = columns.find(c => c.id === "concluido")?.tasks.length ?? 0;
 
   if (loading) {
     return (
@@ -887,7 +864,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2 text-sm font-semibold text-slate-400">
             <RefreshCw size={14} className="animate-spin text-indigo-400" />
-            A sincronizar com Google Sheets...
+            Carregando do Sheets...
           </div>
         </div>
       </div>
@@ -1016,30 +993,29 @@ export default function App() {
                   <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: col.color }} />
                   <span className="text-sm font-black text-[#0f172a]">{col.title}</span>
                   <span className="text-[10px] font-black px-2 py-0.5 rounded-full ml-auto" style={{ background: col.accent, color: col.color }}>
-                    {col.tasks?.length || 0}
+                    {col.tasks.length}
                   </span>
                 </div>
 
                 <div
                   className="flex-1 overflow-y-auto space-y-3 pb-4 px-0.5 rounded-2xl transition-all"
                   style={{
-                    scrollbarWidth: "thin", 
-                    scrollbarColor: "#e2e8f0 transparent",
-                    background: dragOverCol === col.id ? col.accent : undefined,
-                    outline: dragOverCol === col.id ? `2px dashed ${col.color}` : undefined,
+                    scrollbarWidth: "thin", scrollbarColor: "#e2e8f0 transparent",
+                    background: dragOverCol === col.id ? col.accent : "transparent",
+                    outline: dragOverCol === col.id ? `2px dashed ${col.color}` : "2px dashed transparent",
                     padding: dragOverCol === col.id ? "8px 4px" : "0 2px",
                   }}
                   onDragOver={e => { e.preventDefault(); setDragOverCol(col.id); }}
                   onDragLeave={() => setDragOverCol(null)}
                   onDrop={() => handleDrop(col.id)}
                 >
-                  {(!col.tasks || col.tasks.length === 0) && (
+                  {col.tasks.length === 0 && (
                     <div className="flex flex-col items-center justify-center py-10 rounded-2xl border-2 border-dashed border-slate-200 text-slate-300">
                       <CheckCircle size={22} />
                       <p className="text-xs font-semibold mt-2">Vazio</p>
                     </div>
                   )}
-                  {col.tasks?.map(task => {
+                  {col.tasks.map(task => {
                     const prio = priorityBadge(task.priority);
                     const meta = getCollabMeta(task.assignee);
                     const isDuplicate = duplicateTitleSet.has(task.title);
@@ -1052,6 +1028,7 @@ export default function App() {
                         className="bg-white rounded-2xl shadow-sm group hover:shadow-md transition-all cursor-grab active:cursor-grabbing overflow-hidden"
                         style={{
                           border: isDuplicate ? "1.5px solid #f59e0b" : "1px solid #e8ecf4",
+                          // CORREÇÃO: foca exclusivamente no ID único da tarefa, isolando a opacidade/seleção
                           opacity: dragState?.taskId === task.id ? 0.5 : 1,
                           background: isDuplicate ? "#fffdf0" : "#fff",
                         }}
