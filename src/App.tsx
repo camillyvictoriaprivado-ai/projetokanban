@@ -27,9 +27,12 @@ interface Step { id: string; label: string; status: StepStatus; }
 
 interface KanbanTask {
   id: string; title: string; ionix: string; cluster: string; uf: string;
+  material: string;
+  quantidade: string;
   description: string; assignee: string; assigneeInitials: string; assigneeColor: string;
   priority: Priority; dueDate: string; steps: Step[]; tags: string[];
   checklist: ChecklistItem[]; subtasks: Subtask[]; annotations: Annotation[];
+  previousColumnId?: string;
 }
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
@@ -94,12 +97,13 @@ function Toast({ message, type, onDismiss }: { message: string; type: "success" 
 // Task Detail Modal
 // ──────────────────────────────────────────
 function TaskDetailModal({
-  task, columnId, onClose, onUpdate, onComplete, onRemove,
+  task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn,
 }: {
   task: KanbanTask; columnId: string; onClose: () => void;
   onUpdate: (u: KanbanTask) => void;
   onComplete: (colId: string, taskId: string) => void;
   onRemove: (colId: string, taskId: string) => void;
+  onReturn: (colId: string, taskId: string) => void;
 }) {
   const [local, setLocal] = useState<KanbanTask>({ ...task });
   const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes">("info");
@@ -180,13 +184,24 @@ function TaskDetailModal({
                 <CheckCircle size={14} /> Concluir tarefa
               </button>
             ) : (
-              <button
-                onClick={() => { if (confirm("Deletar permanentemente dos concluídos?")) { onRemove(columnId, task.id); onClose(); } }}
-                className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all"
-                style={{ background: "linear-gradient(135deg, #ef4444, #dc2626)" }}
-              >
-                <Trash2 size={14} /> Remover
-              </button>
+              <>
+                {task.previousColumnId && (
+                  <button
+                    onClick={() => { onReturn(columnId, task.id); onClose(); }}
+                    className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all"
+                    style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}
+                  >
+                    <RefreshCw size={14} /> Retornar
+                  </button>
+                )}
+                <button
+                  onClick={() => { if (confirm("Deletar permanentemente dos concluídos?")) { onRemove(columnId, task.id); onClose(); } }}
+                  className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all"
+                  style={{ background: "linear-gradient(135deg, #ef4444, #dc2626)" }}
+                >
+                  <Trash2 size={14} /> Remover
+                </button>
+              </>
             )}
             <button onClick={onClose} className="p-2 rounded-xl hover:bg-gray-100 text-[#6b7a99] transition-colors">
               <X size={17} />
@@ -221,6 +236,8 @@ function TaskDetailModal({
                   { icon: <Zap size={12} />,        label: "Ionix",       value: local.ionix || "—" },
                   { icon: <LayoutGrid size={12} />, label: "Cluster",     value: local.cluster || "—" },
                   { icon: <ChevronRight size={12} />,label: "UF",         value: local.uf || "—" },
+                  { icon: <FileText size={12} />,   label: "Material",    value: local.material || "—" },
+                  { icon: <ClipboardList size={12} />, label: "Quantidade", value: local.quantidade || "—" },
                   { icon: <Calendar size={12} />,   label: "Vencimento",  value: local.dueDate || "—" },
                 ].map(row => (
                   <div key={row.label} className="flex items-start gap-2.5 rounded-2xl px-3.5 py-3 border border-gray-100" style={{ background: "#f8fafc" }}>
@@ -432,6 +449,8 @@ export default function App() {
   const [filterOpen, setFilterOpen] = useState(false);
   const [openTask, setOpenTask] = useState<{ task: KanbanTask; columnId: string } | null>(null);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "loading" } | null>(null);
+  const [dragState, setDragState] = useState<{ taskId: string; fromColId: string } | null>(null);
+  const [dragOverCol, setDragOverCol] = useState<string | null>(null);
 
   const showToast = useCallback((message: string, type: "success" | "error" | "loading") => {
     setToast({ message, type });
@@ -467,6 +486,8 @@ export default function App() {
                 ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
                 cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
                 uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+                material: task.material || task.description?.match(/Material[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
+                quantidade: task.quantidade || task.description?.match(/Qtd?[a-z.]*[:\s]+([^\n|]+)/i)?.[1]?.trim() || task.description?.match(/Quantidade[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
                 description: task.description || "",
                 assignee: task.assignee || "Não atribuído",
                 assigneeInitials: meta.initials,
@@ -518,6 +539,7 @@ export default function App() {
 
     // 2. Atualiza o estado otimisticamente (move o card na UI)
     const prevColumns = columns; // salva snapshot para rollback
+    taskToMove = { ...taskToMove, previousColumnId: columnId };
     setColumns(prev => {
       const withoutTask = prev.map(col =>
         col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
@@ -556,6 +578,62 @@ export default function App() {
   const handleRemoveFromCompleted = async (columnId: string, taskId: string) => {
     setColumns(prev => prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col));
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId }) }).catch(() => {});
+  };
+
+  const handleReturnTask = async (columnId: string, taskId: string) => {
+    let taskToReturn: KanbanTask | null = null;
+    const sourceCol = columns.find(c => c.id === columnId);
+    if (sourceCol) {
+      const found = sourceCol.tasks.find(t => t.id === taskId);
+      if (found) taskToReturn = { ...found };
+    }
+    if (!taskToReturn) return;
+
+    const targetColId = taskToReturn.previousColumnId || "semservico";
+    const prevColumns = columns;
+    setColumns(prev => {
+      const withoutTask = prev.map(col =>
+        col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
+      );
+      return withoutTask.map(col =>
+        col.id === targetColId ? { ...col, tasks: [...col.tasks, { ...taskToReturn!, previousColumnId: undefined }] } : col
+      );
+    });
+    showToast("Tarefa retornada!", "success");
+    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToReturn, targetColumn: targetColId }) }).catch(() => {});
+  };
+
+  const handleDragStart = (taskId: string, fromColId: string) => {
+    setDragState({ taskId, fromColId });
+  };
+
+  const handleDrop = (toColId: string) => {
+    if (!dragState || dragState.fromColId === toColId) {
+      setDragState(null);
+      setDragOverCol(null);
+      return;
+    }
+    const { taskId, fromColId } = dragState;
+    let taskToMove: KanbanTask | null = null;
+    const sourceCol = columns.find(c => c.id === fromColId);
+    if (sourceCol) {
+      const found = sourceCol.tasks.find(t => t.id === taskId);
+      if (found) taskToMove = { ...found, previousColumnId: fromColId };
+    }
+    if (!taskToMove) { setDragState(null); setDragOverCol(null); return; }
+
+    setColumns(prev => {
+      const withoutTask = prev.map(col =>
+        col.id === fromColId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
+      );
+      return withoutTask.map(col =>
+        col.id === toColId ? { ...col, tasks: [...col.tasks, taskToMove!] } : col
+      );
+    });
+    showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
+    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: toColId }) }).catch(() => {});
+    setDragState(null);
+    setDragOverCol(null);
   };
 
   const filteredColumns = useMemo(() =>
@@ -610,6 +688,7 @@ export default function App() {
           onUpdate={updateTask}
           onComplete={(colId, taskId) => { handleCompleteTask(colId, taskId); setOpenTask(null); }}
           onRemove={handleRemoveFromCompleted}
+          onReturn={(colId, taskId) => { handleReturnTask(colId, taskId); setOpenTask(null); }}
         />
       )}
 
@@ -735,8 +814,16 @@ export default function App() {
 
                 {/* Column body */}
                 <div
-                  className="flex-1 overflow-y-auto space-y-3 pb-4 px-0.5"
-                  style={{ scrollbarWidth: "thin", scrollbarColor: "#e2e8f0 transparent" }}
+                  className="flex-1 overflow-y-auto space-y-3 pb-4 px-0.5 rounded-2xl transition-all"
+                  style={{
+                    scrollbarWidth: "thin", scrollbarColor: "#e2e8f0 transparent",
+                    background: dragOverCol === col.id ? col.accent : "transparent",
+                    outline: dragOverCol === col.id ? `2px dashed ${col.color}` : "2px dashed transparent",
+                    padding: dragOverCol === col.id ? "8px 4px" : "0 2px",
+                  }}
+                  onDragOver={e => { e.preventDefault(); setDragOverCol(col.id); }}
+                  onDragLeave={() => setDragOverCol(null)}
+                  onDrop={() => handleDrop(col.id)}
                 >
                   {col.tasks.length === 0 && (
                     <div className="flex flex-col items-center justify-center py-10 rounded-2xl border-2 border-dashed border-slate-200 text-slate-300">
@@ -750,8 +837,11 @@ export default function App() {
                     return (
                       <div
                         key={task.id}
-                        className="bg-white rounded-2xl shadow-sm group hover:shadow-md transition-all cursor-pointer overflow-hidden"
-                        style={{ border: "1px solid #e8ecf4" }}
+                        draggable
+                        onDragStart={() => handleDragStart(task.id, col.id)}
+                        onDragEnd={() => { setDragState(null); setDragOverCol(null); }}
+                        className="bg-white rounded-2xl shadow-sm group hover:shadow-md transition-all cursor-grab active:cursor-grabbing overflow-hidden"
+                        style={{ border: "1px solid #e8ecf4", opacity: dragState?.taskId === task.id ? 0.5 : 1 }}
                         onClick={() => setOpenTask({ task, columnId: col.id })}
                       >
                         {/* Left accent bar */}
@@ -777,6 +867,12 @@ export default function App() {
                                 <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 w-10 shrink-0">Cluster</span>
                                 <span className="font-bold text-slate-700 truncate text-[11px]">{task.cluster}</span>
                               </div>
+                              {task.quantidade && task.quantidade !== "—" && (
+                                <div className="flex items-center gap-1.5 text-xs">
+                                  <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 w-10 shrink-0">Qtd</span>
+                                  <span className="font-bold text-indigo-600 truncate text-[11px]">{task.quantidade}</span>
+                                </div>
+                              )}
                             </div>
 
                             {/* Tags */}
@@ -818,13 +914,24 @@ export default function App() {
                                     <CheckCircle size={11} /> Concluir
                                   </button>
                                 ) : (
-                                  <button
-                                    onClick={() => { if (confirm("Deletar permanentemente?")) handleRemoveFromCompleted(col.id, task.id); }}
-                                    className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all"
-                                    style={{ background: "#fff1f2", color: "#e11d48" }}
-                                  >
-                                    <Trash2 size={11} /> Remover
-                                  </button>
+                                  <div className="flex items-center gap-1.5">
+                                    {task.previousColumnId && (
+                                      <button
+                                        onClick={() => handleReturnTask(col.id, task.id)}
+                                        className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white"
+                                        style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}
+                                      >
+                                        <RefreshCw size={11} /> Retornar
+                                      </button>
+                                    )}
+                                    <button
+                                      onClick={() => { if (confirm("Deletar permanentemente?")) handleRemoveFromCompleted(col.id, task.id); }}
+                                      className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all"
+                                      style={{ background: "#fff1f2", color: "#e11d48" }}
+                                    >
+                                      <Trash2 size={11} /> Remover
+                                    </button>
+                                  </div>
                                 )}
                               </div>
                             </div>
