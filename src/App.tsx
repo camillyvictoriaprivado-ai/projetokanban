@@ -535,8 +535,11 @@ export default function App() {
           rawTasks.forEach((task: any, index: number) => {
             if (!task) return;
             
-            const taskTitle = task.title ? String(task.title).trim() : "Sem ID";
-            const taskId = task.id ? String(task.id) : `${col.id}-task-${index}`;
+            const taskId = task.id
+  ? String(task.id)
+  : `${col.id}-task-${index}`;
+
+const taskTitle = taskId;
 
             const meta = getCollabMeta(task.assignee || "Não atribuído");
             const builtTask: KanbanTask = {
