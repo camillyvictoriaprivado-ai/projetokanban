@@ -5,18 +5,14 @@ import {
   Tag, FileText, ClipboardList, MessageSquare, Circle, CheckCircle2,
   RefreshCw, AlertCircle, Zap
 } from "lucide-react";
-import { Realtime } from "ably"; // 🌟 Importação do Ably adicionada
 
 const API_URL = "https://script.google.com/macros/s/AKfycbwrNNlyRWYq5zayRYSlRfRSC_bFY7tjc4DXxL6TF3YSnHwMOw_h7HY2wF6qFW3MSQsXBQ/exec";
-// 🟢 Chave Root inserida para atualização instantânea (< 1s)
-const ABLY_KEY = "BUp6Lg.QfvVuw:DBQaijX7rEyBdz4A1dXnrDXE68wWcCWkQTUG_BLSk9E"; 
-
-const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; 
-const LS_COLUMNS_KEY     = "tlp_kanban_columns";     
-const LS_PENDING_KEY     = "tlp_kanban_pending";     
-const LS_DELETED_KEY     = "tlp_kanban_deleted";     
-const PENDING_TTL_MS = 3 * 60 * 1000; 
-const POLL_INTERVAL_MS = 30 * 1000; 
+const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations"; // { [persistKey]: Annotation[] }
+const LS_COLUMNS_KEY     = "tlp_kanban_columns";     // { [persistKey]: columnId }  — posição persistida
+const LS_PENDING_KEY     = "tlp_kanban_pending";     // { [persistKey]: { task, columnId, ts } } — movimentos ainda não confirmados pelo Sheets
+const LS_DELETED_KEY     = "tlp_kanban_deleted";     // { [persistKey]: ts } — exclusões ainda não confirmadas pelo Sheets
+const PENDING_TTL_MS = 3 * 60 * 1000; // 3 min — tempo de espera até o Sheets refletir a mudança
+const POLL_INTERVAL_MS = 12 * 1000;   // polling silencioso para sync entre usuários
 
 const COLLABORATORS = [
   { name: "Camilly Silva",  initials: "CS", color: "#4f46e5" },
@@ -37,14 +33,17 @@ interface Step { id: string; label: string; status: StepStatus; }
 
 interface KanbanTask {
   id: string; title: string; ionix: string; cluster: string; uf: string;
-  material: string; quantidade: string; description: string; assignee: string; 
-  assigneeInitials: string; assigneeColor: string; priority: Priority; 
-  dueDate: string; steps: Step[]; tags: string[]; checklist: ChecklistItem[]; 
-  subtasks: Subtask[]; annotations: Annotation[]; previousColumnId?: string;
+  material: string;
+  quantidade: string;
+  description: string; assignee: string; assigneeInitials: string; assigneeColor: string;
+  priority: Priority; dueDate: string; steps: Step[]; tags: string[];
+  checklist: ChecklistItem[]; subtasks: Subtask[]; annotations: Annotation[];
+  previousColumnId?: string;
 }
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
+// Chave estável para persistência local
 function getPersistKey(task: Pick<KanbanTask, "id" | "title">): string {
   if (task.title && task.title !== "Sem ID") return `t:${task.title}`;
   return `i:${task.id}`;
@@ -75,10 +74,13 @@ function stepStatusColor(s: StepStatus) {
   return "#d1d5db";
 }
 
+// ──────────────────────────────────────────
+// Toast notification
+// ──────────────────────────────────────────
 function Toast({ message, type, onDismiss }: { message: string; type: "success" | "error" | "loading"; onDismiss: () => void }) {
   useEffect(() => {
     if (type !== "loading") {
-      const t = setTimeout(onDismiss, 2500);
+      const t = setTimeout(onDismiss, 3500);
       return () => clearTimeout(t);
     }
   }, [type, onDismiss]);
@@ -90,13 +92,22 @@ function Toast({ message, type, onDismiss }: { message: string; type: "success" 
   };
   const c = colors[type];
   return (
-    <div className="fixed bottom-6 right-6 z-[100] flex items-center gap-2.5 px-4 py-3 rounded-2xl shadow-xl text-sm font-medium border" style={{ background: c.bg, borderColor: c.border, color: c.text, minWidth: 240 }}>
+    <div
+      className="fixed bottom-6 right-6 z-[100] flex items-center gap-2.5 px-4 py-3 rounded-2xl shadow-xl text-sm font-medium border"
+      style={{ background: c.bg, borderColor: c.border, color: c.text, minWidth: 240 }}
+    >
       {c.icon}
       <span className="flex-1">{message}</span>
+      {type !== "loading" && (
+        <button onClick={onDismiss} className="ml-1 opacity-60 hover:opacity-100"><X size={13} /></button>
+      )}
     </div>
   );
 }
 
+// ──────────────────────────────────────────
+// Task Detail Modal
+// ──────────────────────────────────────────
 function TaskDetailModal({
   task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn,
 }: {
@@ -107,7 +118,7 @@ function TaskDetailModal({
   onReturn: (colId: string, taskId: string) => void;
 }) {
   const [local, setLocal] = useState<KanbanTask>({ ...task });
-  const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes">("info");
+  const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes" >("info");
   const [newCheckItem, setNewCheckItem] = useState("");
   const [newNote, setNewNote] = useState("");
   const [newSubtask, setNewSubtask] = useState({ title: "", assignee: "", status: "pendente" as SubtaskStatus });
@@ -162,41 +173,69 @@ function TaskDetailModal({
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(10,16,36,0.6)", backdropFilter: "blur(6px)" }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: "rgba(10,16,36,0.6)", backdropFilter: "blur(6px)" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div className="relative flex flex-col rounded-3xl shadow-2xl overflow-hidden" style={{ width: 700, maxHeight: "92vh", background: "#fff" }}>
         <div className="h-1 w-full" style={{ background: "linear-gradient(90deg, #4f46e5, #7c3aed, #db2777)" }} />
+
         <div className="flex items-start justify-between px-7 pt-5 pb-4 border-b border-gray-100">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1.5">
               <span className="text-[10px] font-black uppercase tracking-widest text-[#6b7a99]">Tarefa</span>
               <span className="flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: prio.bg, color: prio.text }}>
-                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: prio.dot }} /> {prio.label}
+                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: prio.dot }} />
+                {prio.label}
               </span>
             </div>
             <h2 className="text-xl font-black text-[#0f172a] leading-tight">{local.title}</h2>
           </div>
           <div className="flex items-center gap-2 ml-4 shrink-0">
             {columnId !== "concluido" ? (
-              <button onClick={() => { onComplete(columnId, task.id); onClose(); }} className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all" style={{ background: "linear-gradient(135deg, #10b981, #059669)" }}>
+              <button
+                onClick={() => { onComplete(columnId, task.id); onClose(); }}
+                className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all"
+                style={{ background: "linear-gradient(135deg, #10b981, #059669)" }}
+              >
                 <CheckCircle size={14} /> Concluir tarefa
               </button>
             ) : (
               <>
-                <button onClick={() => { onReturn(columnId, task.id); onClose(); }} className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all" style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}>
+                <button
+                  onClick={() => { onReturn(columnId, task.id); onClose(); }}
+                  className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all"
+                  style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}
+                >
                   <RefreshCw size={14} /> Retornar
                 </button>
-                <button onClick={() => { if (confirm("Deletar permanentemente dos concluídos?")) { onRemove(columnId, task.id); onClose(); } }} className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all" style={{ background: "linear-gradient(135deg, #ef4444, #dc2626)" }}>
+                <button
+                  onClick={() => { if (confirm("Deletar permanentemente dos concluídos?")) { onRemove(columnId, task.id); onClose(); } }}
+                  className="flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl text-white transition-all"
+                  style={{ background: "linear-gradient(135deg, #ef4444, #dc2626)" }}
+                >
                   <Trash2 size={14} /> Remover
                 </button>
               </>
             )}
-            <button onClick={onClose} className="p-2 rounded-xl hover:bg-gray-100 text-[#6b7a99] transition-colors"><X size={17} /></button>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-gray-100 text-[#6b7a99] transition-colors">
+              <X size={17} />
+            </button>
           </div>
         </div>
 
         <div className="flex gap-0 px-7 border-b border-gray-100" style={{ background: "#fafafa" }}>
           {tabs.map(tab => (
-            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className="flex items-center gap-1.5 px-3 py-3 text-xs font-bold transition-all border-b-2" style={{ borderColor: activeTab === tab.id ? "#4f46e5" : "transparent", color: activeTab === tab.id ? "#4f46e5" : "#94a3b8" }}>
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className="flex items-center gap-1.5 px-3 py-3 text-xs font-bold transition-all border-b-2"
+              style={{
+                borderColor: activeTab === tab.id ? "#4f46e5" : "transparent",
+                color: activeTab === tab.id ? "#4f46e5" : "#94a3b8",
+              }}
+            >
               {tab.icon}{tab.label}
             </button>
           ))}
@@ -253,7 +292,32 @@ function TaskDetailModal({
               {local.description && (
                 <div>
                   <p className="text-[9px] font-black uppercase tracking-widest text-[#94a3b8] mb-2">Descrição</p>
-                  <p className="text-sm text-[#334155] rounded-2xl p-4 border border-gray-100 whitespace-pre-line leading-relaxed" style={{ background: "#f8fafc" }}>{local.description}</p>
+                  <p className="text-sm text-[#334155] rounded-2xl p-4 border border-gray-100 whitespace-pre-line leading-relaxed" style={{ background: "#f8fafc" }}>
+                    {local.description}
+                  </p>
+                </div>
+              )}
+
+              {local.steps.length > 0 && (
+                <div>
+                  <p className="text-[9px] font-black uppercase tracking-widest text-[#94a3b8] mb-2">Etapas</p>
+                  <div className="space-y-2">
+                    {local.steps.map(step => (
+                      <button key={step.id} onClick={() => cycleStep(step.id)}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 rounded-2xl border border-gray-100 hover:border-indigo-200 transition-all text-left"
+                        style={{ background: "#f8fafc" }}
+                      >
+                        <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: stepStatusColor(step.status) }} />
+                        <span className="flex-1 text-sm font-semibold text-[#0f172a]">{step.label}</span>
+                        <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-1 rounded-lg"
+                          style={{
+                            background: step.status === "concluído" ? "#d1fae5" : step.status === "em andamento" ? "#fff7ed" : "#f1f5f9",
+                            color: step.status === "concluído" ? "#065f46" : step.status === "em andamento" ? "#c2410c" : "#64748b",
+                          }}
+                        >{step.status}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -279,15 +343,25 @@ function TaskDetailModal({
                           {item.done ? <CheckCircle2 size={18} className="text-emerald-500" /> : <Circle size={18} className="text-gray-300 group-hover:text-indigo-300 transition-colors" />}
                         </button>
                         <span className={`flex-1 text-sm ${item.done ? "line-through text-gray-400" : "font-medium text-[#0f172a]"}`}>{item.label}</span>
-                        <button onClick={() => removeCheck(item.id)} className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-rose-500 transition-all"><Trash2 size={13} /></button>
+                        <button onClick={() => removeCheck(item.id)} className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-rose-500 transition-all">
+                          <Trash2 size={13} />
+                        </button>
                       </div>
                     ))}
                   </div>
                 </>
               )}
               <div className="flex gap-2">
-                <input value={newCheckItem} onChange={e => setNewCheckItem(e.target.value)} onKeyDown={e => e.key === "Enter" && addCheckItem()} placeholder="Nova atividade..." className="flex-1 text-sm px-4 py-2.5 rounded-xl border border-gray-200 bg-white focus:outline-none focus:border-indigo-300" />
-                <button onClick={addCheckItem} className="px-4 py-2.5 rounded-xl text-white transition-colors" style={{ background: "#4f46e5" }}><Plus size={16} /></button>
+                <input
+                  value={newCheckItem}
+                  onChange={e => setNewCheckItem(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && addCheckItem()}
+                  placeholder="Nova atividade..."
+                  className="flex-1 text-sm px-4 py-2.5 rounded-xl border border-gray-200 bg-white focus:outline-none focus:border-indigo-300"
+                />
+                <button onClick={addCheckItem} className="px-4 py-2.5 rounded-xl text-white transition-colors" style={{ background: "#4f46e5" }}>
+                  <Plus size={16} />
+                </button>
               </div>
             </div>
           )}
@@ -302,26 +376,40 @@ function TaskDetailModal({
                         <p className="text-sm font-bold text-[#0f172a] truncate">{sub.title}</p>
                         <p className="text-xs text-[#94a3b8]">{sub.assignee || "Sem responsável"}</p>
                       </div>
-                      <select value={sub.status} onChange={e => updateSubtask(sub.id, { status: e.target.value as SubtaskStatus })} className="text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-lg border-none cursor-pointer" style={{ background: sub.status === "concluído" ? "#d1fae5" : sub.status === "em andamento" ? "#fff7ed" : "#f1f5f9" }}>
+                      <select
+                        value={sub.status}
+                        onChange={e => updateSubtask(sub.id, { status: e.target.value as SubtaskStatus })}
+                        className="text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-lg border-none cursor-pointer"
+                        style={{ background: sub.status === "concluído" ? "#d1fae5" : sub.status === "em andamento" ? "#fff7ed" : "#f1f5f9" }}
+                      >
                         <option value="pendente">Pendente</option>
                         <option value="em andamento">Em andamento</option>
                         <option value="concluído">Concluído</option>
                       </select>
-                      <button onClick={() => removeSubtask(sub.id)} className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-rose-500 transition-all"><Trash2 size={13} /></button>
+                      <button onClick={() => removeSubtask(sub.id)} className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-rose-500 transition-all">
+                        <Trash2 size={13} />
+                      </button>
                     </div>
                   ))}
                 </div>
               )}
               {showSubtaskForm ? (
                 <div className="space-y-2 rounded-2xl p-4 border border-indigo-100" style={{ background: "#f5f3ff" }}>
-                  <input value={newSubtask.title} onChange={e => setNewSubtask(s => ({ ...s, title: e.target.value }))} placeholder="Título da subtarefa..." className="w-full text-sm px-4 py-2.5 rounded-xl border border-indigo-200 focus:outline-none bg-white" />
+                  <input
+                    value={newSubtask.title}
+                    onChange={e => setNewSubtask(s => ({ ...s, title: e.target.value }))}
+                    placeholder="Título da subtarefa..."
+                    className="w-full text-sm px-4 py-2.5 rounded-xl border border-indigo-200 focus:outline-none bg-white"
+                  />
                   <div className="flex gap-2">
                     <button onClick={addSubtask} className="flex-1 text-sm font-bold py-2.5 rounded-xl text-white" style={{ background: "#4f46e5" }}>Adicionar</button>
                     <button onClick={() => setShowSubtaskForm(false)} className="px-4 py-2.5 rounded-xl border text-sm text-[#6b7a99]">Cancelar</button>
                   </div>
                 </div>
               ) : (
-                <button onClick={() => setShowSubtaskForm(true)} className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl border-2 border-dashed border-indigo-200 text-indigo-400 hover:bg-indigo-50 transition-colors"><Plus size={15} /> Nova subtarefa</button>
+                <button onClick={() => setShowSubtaskForm(true)} className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl border-2 border-dashed border-indigo-200 text-indigo-400 hover:bg-indigo-50 transition-colors">
+                  <Plus size={15} /> Nova subtarefa
+                </button>
               )}
             </div>
           )}
@@ -334,14 +422,24 @@ function TaskDetailModal({
                     <div key={ann.id} className="relative rounded-2xl px-4 py-3.5 border border-amber-100 group" style={{ background: "#fffbeb" }}>
                       <p className="text-sm text-[#0f172a] leading-relaxed">{ann.text}</p>
                       <p className="text-[10px] text-amber-400 mt-1.5 font-medium">{ann.createdAt}</p>
-                      <button onClick={() => removeNote(ann.id)} className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 text-amber-300 hover:text-rose-500 transition-all"><Trash2 size={12} /></button>
+                      <button onClick={() => removeNote(ann.id)} className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 text-amber-300 hover:text-rose-500 transition-all">
+                        <Trash2 size={12} />
+                      </button>
                     </div>
                   ))}
                 </div>
               )}
               <div className="flex flex-col gap-2">
-                <textarea value={newNote} onChange={e => setNewNote(e.target.value)} placeholder="Escreva uma anotação..." rows={3} className="w-full text-sm px-4 py-3 rounded-2xl border border-gray-200 focus:outline-none focus:border-amber-300 resize-none" />
-                <button onClick={addNote} className="self-end flex items-center gap-2 text-sm font-bold px-5 py-2.5 rounded-xl text-white" style={{ background: "#d97706" }}><Plus size={14} /> Adicionar nota</button>
+                <textarea
+                  value={newNote}
+                  onChange={e => setNewNote(e.target.value)}
+                  placeholder="Escreva uma anotação..."
+                  rows={3}
+                  className="w-full text-sm px-4 py-3 rounded-2xl border border-gray-200 focus:outline-none focus:border-amber-300 resize-none"
+                />
+                <button onClick={addNote} className="self-end flex items-center gap-2 text-sm font-bold px-5 py-2.5 rounded-xl text-white" style={{ background: "#d97706" }}>
+                  <Plus size={14} /> Adicionar nota
+                </button>
               </div>
             </div>
           )}
@@ -351,10 +449,9 @@ function TaskDetailModal({
   );
 }
 
-// Inicializando canal em tempo real do Ably
-const ably = new Realtime({ key: ABLY_KEY });
-const channel = ably.channels.get("kanban-live");
-
+// ──────────────────────────────────────────
+// Main App
+// ──────────────────────────────────────────
 export default function App() {
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
@@ -381,10 +478,6 @@ export default function App() {
     { id: "concluido",   title: "Concluído",    color: "#10b981", accent: "#f0fdf4" },
   ], []);
 
-  const broadcastChange = (type: string, payload: any) => {
-    if (channel) channel.publish(type, payload);
-  };
-
   const persistColumnPos = (task: KanbanTask, colId: string) => {
     const key = getPersistKey(task);
     try {
@@ -397,6 +490,27 @@ export default function App() {
       pending[key] = { task: { ...task, previousColumnId: undefined }, columnId: colId, ts: Date.now() };
       localStorage.setItem(LS_PENDING_KEY, JSON.stringify(pending));
     } catch {}
+    try {
+      const deleted = JSON.parse(localStorage.getItem(LS_DELETED_KEY) || "{}");
+      if (deleted[key]) {
+        delete deleted[key];
+        localStorage.setItem(LS_DELETED_KEY, JSON.stringify(deleted));
+      }
+    } catch {}
+  };
+
+  const persistDeletion = (task: KanbanTask) => {
+    const key = getPersistKey(task);
+    try {
+      const deleted = JSON.parse(localStorage.getItem(LS_DELETED_KEY) || "{}");
+      deleted[key] = Date.now();
+      localStorage.setItem(LS_DELETED_KEY, JSON.stringify(deleted));
+    } catch {}
+    try {
+      const pending = JSON.parse(localStorage.getItem(LS_PENDING_KEY) || "{}");
+      delete pending[key];
+      localStorage.setItem(LS_PENDING_KEY, JSON.stringify(pending));
+    } catch {}
   };
 
   const loadKanban = useCallback(async (silent = false) => {
@@ -407,13 +521,21 @@ export default function App() {
       if (data && typeof data === "object" && !Array.isArray(data)) {
         let savedAnnotations: Record<string, Annotation[]> = {};
         let savedColumns: Record<string, string> = {};
+        let pending: Record<string, { task: KanbanTask; columnId: string; ts: number }> = {};
+        let deleted: Record<string, number> = {};
         try { savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
         try { savedColumns    = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY)     || "{}"); } catch {}
+        try { pending         = JSON.parse(localStorage.getItem(LS_PENDING_KEY)     || "{}"); } catch {}
+        try { deleted         = JSON.parse(localStorage.getItem(LS_DELETED_KEY)     || "{}"); } catch {}
 
+        const now = Date.now();
         const allTasksFlat: { task: KanbanTask; apiColId: string; key: string }[] = [];
 
         officialColumnsStructure.forEach((col) => {
-          const rawTasks = data[col.id] || [];
+          // BUG FIX WINDOWS: Ignora se a aba vier como acaost, acaoST, AcaoSt, etc.
+          const apiKey = Object.keys(data).find(k => k.toLowerCase() === col.id.toLowerCase()) || col.id;
+          const rawTasks = data[apiKey] || [];
+          
           if (!Array.isArray(rawTasks)) return;
           rawTasks.forEach((task: any, index: number) => {
             if (!task) return;
@@ -435,7 +557,9 @@ export default function App() {
               dueDate: task.dueDate || "",
               steps: [],
               tags: Array.isArray(task.tags) ? task.tags : [],
-              checklist: [], subtasks: [], annotations: [],
+              checklist: [],
+              subtasks: [],
+              annotations: [],
             };
             const key = getPersistKey(builtTask);
             builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
@@ -443,57 +567,59 @@ export default function App() {
           });
         });
 
+        const liveTasks = allTasksFlat.filter(({ key }) => {
+          const ts = deleted[key];
+          return !(ts && now - ts < PENDING_TTL_MS);
+        });
+
         const builtColumns: Column[] = officialColumnsStructure.map((col) => {
-          const tasks = allTasksFlat
+          const tasks = liveTasks
             .filter(({ apiColId, key }) => {
               const localCol = savedColumns[key];
               return localCol ? localCol === col.id : apiColId === col.id;
             })
-            .map(({ task }) => {
-              if (savedColumns[getPersistKey(task)] === "concluido" && !task.tags.includes("Concluído")) {
-                task.tags = [...task.tags, "Concluído"];
-              }
-              return task;
-            });
+            .map(({ task }) => task);
           return { ...col, tasks };
         });
 
-        setColumns(builtColumns);
-        
-        setOpenTask(prev => {
-          if (!prev) return null;
-          for (const c of builtColumns) {
-            const found = c.tasks.find(t => t.id === prev.task.id);
-            if (found) return { task: found, columnId: c.id };
+        const remainingPending: typeof pending = {};
+        Object.entries(pending).forEach(([key, p]) => {
+          if (now - p.ts > PENDING_TTL_MS) return;
+          const present = liveTasks.find(t => t.key === key);
+          const alreadyInTargetCol = builtColumns
+            .find(c => c.id === p.columnId)
+            ?.tasks.some(t => getPersistKey(t) === key);
+
+          if (alreadyInTargetCol) return;
+
+          if (present) {
+            builtColumns.forEach(c => { c.tasks = c.tasks.filter(t => getPersistKey(t) !== key); });
           }
-          return prev;
+          const targetCol = builtColumns.find(c => c.id === p.columnId);
+          if (targetCol) {
+            const taskWithNotes = { ...p.task, annotations: savedAnnotations[key]?.length ? savedAnnotations[key] : p.task.annotations };
+            targetCol.tasks.push(taskWithNotes);
+          }
+          remainingPending[key] = p;
         });
+        try { localStorage.setItem(LS_PENDING_KEY, JSON.stringify(remainingPending)); } catch {}
+
+        const remainingDeleted: Record<string, number> = {};
+        Object.entries(deleted).forEach(([key, ts]) => {
+          if (now - ts < PENDING_TTL_MS) remainingDeleted[key] = ts;
+        });
+        try { localStorage.setItem(LS_DELETED_KEY, JSON.stringify(remainingDeleted)); } catch {}
+
+        setColumns(builtColumns);
       }
     } catch (error) {
-      console.error(error);
+      console.error("Erro ao ler API:", error);
     } finally {
       if (!silent) setLoading(false);
     }
   }, [officialColumnsStructure]);
 
-  // 📡 Escuta ativa do Ably: Atualiza as duas telas na mesma hora!
-  useEffect(() => {
-    loadKanban();
-    if (channel) {
-      channel.subscribe("task_moved", (message) => {
-        const { taskId, toColId, task } = message.data;
-        setColumns(prev => {
-          const clean = prev.map(c => ({ ...c, tasks: c.tasks.filter(t => t.id !== taskId) }));
-          return clean.map(c => c.id === toColId ? { ...c, tasks: [...c.tasks, task] } : c);
-        });
-      });
-      channel.subscribe("task_updated", (message) => {
-        const { updatedTask } = message.data;
-        setColumns(prev => prev.map(c => ({ ...c, tasks: c.tasks.map(t => t.id === updatedTask.id ? updatedTask : t) })));
-      });
-    }
-    return () => { if (channel) channel.unsubscribe(); };
-  }, [loadKanban]);
+  useEffect(() => { loadKanban(); }, [loadKanban]);
 
   useEffect(() => {
     const interval = setInterval(() => loadKanban(true), POLL_INTERVAL_MS);
@@ -502,26 +628,12 @@ export default function App() {
 
   const updateTask = (updated: KanbanTask) => {
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
-    broadcastChange("task_updated", { updatedTask: updated });
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: updated }) }).catch(() => {});
   };
 
   const handleAssigneeChange = async (taskId: string, newAssignee: string) => {
     const meta = getCollabMeta(newAssignee);
-    let updatedTask: KanbanTask | null = null;
-    
-    setColumns(prev => prev.map(col => ({
-      ...col,
-      tasks: col.tasks.map(t => {
-        if (t.id === taskId) {
-          updatedTask = { ...t, assignee: newAssignee, assigneeInitials: meta.initials, assigneeColor: meta.color };
-          return updatedTask;
-        }
-        return t;
-      })
-    })));
-    
-    if (updatedTask) broadcastChange("task_updated", { updatedTask });
+    setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === taskId ? { ...t, assignee: newAssignee, assigneeInitials: meta.initials, assigneeColor: meta.color } : t) })));
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId, assignee: newAssignee }) }).catch(() => {});
   };
 
@@ -530,24 +642,50 @@ export default function App() {
     const sourceCol = columns.find(c => c.id === columnId);
     if (sourceCol) {
       const found = sourceCol.tasks.find(t => t.id === taskId);
-      if (found) taskToMove = { ...found, tags: ["Concluído"], previousColumnId: columnId };
+      if (found) taskToMove = { ...found, tags: ["Concluído"] };
     }
+
     if (!taskToMove) return;
 
+    const prevColumns = columns;
+    taskToMove = { ...taskToMove, previousColumnId: columnId };
     setColumns(prev => {
-      const clean = prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col);
-      return clean.map(col => col.id === "concluido" ? { ...col, tasks: [...col.tasks, taskToMove!] } : col);
+      const withoutTask = prev.map(col =>
+        col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
+      );
+      return withoutTask.map(col =>
+        col.id === "concluido" ? { ...col, tasks: [...col.tasks, taskToMove!] } : col
+      );
     });
 
-    persistColumnPos(taskToMove, "concluido");
-    broadcastChange("task_moved", { taskId, toColId: "concluido", task: taskToMove });
-    showToast("Tarefa concluída!", "success");
+    showToast("Enviando para o Sheets...", "loading");
 
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: "concluido" }) });
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: "concluido" }),
+      });
+
+      const result = await res.json().catch(() => ({ status: "error", message: "Resposta inválida" }));
+
+      if (result.status === "success") {
+        persistColumnPos(taskToMove!, "concluido");
+        showToast("Tarefa concluída com sucesso!", "success");
+      } else {
+        setColumns(prevColumns);
+        showToast(`Erro ao concluir: ${result.message || "tente novamente"}`, "error");
+      }
+    } catch (err) {
+      setColumns(prevColumns);
+      showToast("Erro de conexão. O card foi restaurado.", "error");
+    }
   };
 
   const handleRemoveFromCompleted = async (columnId: string, taskId: string) => {
+    const sourceCol = columns.find(c => c.id === columnId);
+    const taskToDelete = sourceCol?.tasks.find(t => t.id === taskId);
     setColumns(prev => prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col));
+    if (taskToDelete) persistDeletion(taskToDelete);
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "deleteTask", taskId }) }).catch(() => {});
   };
 
@@ -556,26 +694,23 @@ export default function App() {
     const sourceCol = columns.find(c => c.id === columnId);
     if (sourceCol) {
       const found = sourceCol.tasks.find(t => t.id === taskId);
-      if (found) {
-        const cleanTags = (found.tags || []).filter(t => t !== "Concluído");
-        taskToReturn = { ...found, tags: cleanTags };
-      }
+      if (found) taskToReturn = { ...found };
     }
     if (!taskToReturn) return;
 
     const targetColId = taskToReturn.previousColumnId || "semservico";
-    taskToReturn.previousColumnId = undefined; 
-
+    const prevColumns = columns;
     setColumns(prev => {
-      const clean = prev.map(col => col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col);
-      return clean.map(col => col.id === targetColId ? { ...col, tasks: [...col.tasks, taskToReturn!] } : col);
+      const withoutTask = prev.map(col =>
+        col.id === columnId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
+      );
+      return withoutTask.map(col =>
+        col.id === targetColId ? { ...col, tasks: [...col.tasks, { ...taskToReturn!, previousColumnId: undefined }] } : col
+      );
     });
-
-    persistColumnPos(taskToReturn, targetColId);
-    broadcastChange("task_moved", { taskId, toColId: targetColId, task: taskToReturn });
-    showToast("Tarefa retornada ao fluxo!", "success");
-
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToReturn, targetColumn: targetColId }) });
+    showToast("Tarefa retornada!", "success");
+    persistColumnPos({ ...taskToReturn, previousColumnId: undefined }, targetColId);
+    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToReturn, targetColumn: targetColId }) }).catch(() => {});
   };
 
   const handleDragStart = (taskId: string, fromColId: string) => {
@@ -584,7 +719,9 @@ export default function App() {
 
   const handleDrop = (toColId: string) => {
     if (!dragState || dragState.fromColId === toColId) {
-      setDragState(null); setDragOverCol(null); return;
+      setDragState(null);
+      setDragOverCol(null);
+      return;
     }
     const { taskId, fromColId } = dragState;
     let taskToMove: KanbanTask | null = null;
@@ -596,15 +733,37 @@ export default function App() {
     if (!taskToMove) { setDragState(null); setDragOverCol(null); return; }
 
     setColumns(prev => {
-      const clean = prev.map(col => col.id === fromColId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col);
-      return clean.map(col => col.id === toColId ? { ...col, tasks: [...col.tasks, taskToMove!] } : col);
+      const withoutTask = prev.map(col =>
+        col.id === fromColId ? { ...col, tasks: col.tasks.filter(t => t.id !== taskId) } : col
+      );
+      return withoutTask.map(col =>
+        col.id === toColId ? { ...col, tasks: [...col.tasks, taskToMove!] } : col
+      );
     });
-
+    showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
     persistColumnPos(taskToMove, toColId);
-    broadcastChange("task_moved", { taskId, toColId, task: taskToMove });
-    
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: taskToMove, targetColumn: toColId }) });
-    setDragState(null); setDragOverCol(null);
+
+    // BUG FIX WINDOWS: Altera a action para criar linha se o destino for acaost
+    const apiAction = toColId === "acaost" ? "createActionST" : "updateTask";
+
+    fetch(API_URL, { 
+      method: "POST", 
+      body: JSON.stringify({ 
+        action: apiAction, 
+        task: taskToMove, 
+        targetColumn: toColId 
+      }) 
+    })
+    .then(res => res.json())
+    .then(result => {
+      if (result.status === "success") {
+        loadKanban(true); // Recarrega silenciosamente para alinhar os dados
+      }
+    })
+    .catch(() => {});
+
+    setDragState(null);
+    setDragOverCol(null);
   };
 
   const filteredColumns = useMemo(() =>
@@ -620,7 +779,7 @@ export default function App() {
 
   const duplicateTitleSet = useMemo(() => {
     const count: Record<string, number> = {};
-    columns.forEach(col => col.tasks.forEach(t => { if (t.title) count[t.title] = (count[t.title] || 0) + 1; }));
+    columns.forEach(col => col.tasks.forEach(t => { count[t.title] = (count[t.title] || 0) + 1; }));
     return new Set(Object.entries(count).filter(([, n]) => n > 1).map(([k]) => k));
   }, [columns]);
 
@@ -642,7 +801,8 @@ export default function App() {
             <span className="text-white font-black text-sm">TLP</span>
           </div>
           <div className="flex items-center gap-2 text-sm font-semibold text-slate-400">
-            <RefreshCw size={14} className="animate-spin text-indigo-400" /> Sincronizando com o Sheets...
+            <RefreshCw size={14} className="animate-spin text-indigo-400" />
+            Sincronizando com o Sheets...
           </div>
         </div>
       </div>
@@ -665,7 +825,10 @@ export default function App() {
         />
       )}
 
-      <aside className={`flex flex-col shrink-0 transition-all duration-300`} style={{ width: sidebarOpen ? 220 : 64, background: "#0f172a", borderRight: "1px solid rgba(255,255,255,0.06)" }}>
+      <aside
+        className={`flex flex-col shrink-0 transition-all duration-300`}
+        style={{ width: sidebarOpen ? 220 : 64, background: "#0f172a", borderRight: "1px solid rgba(255,255,255,0.06)" }}
+      >
         <div className="flex items-center gap-3 px-4 h-16 shrink-0" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
           <div className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0" style={{ background: "linear-gradient(135deg, #f97316, #4f46e5)" }}>
             <span className="text-white font-black text-xs">TLP</span>
@@ -680,7 +843,15 @@ export default function App() {
 
         <nav className="flex-1 py-4 space-y-0.5 overflow-y-auto px-2">
           {navItems.map(item => (
-            <button key={item.id} onClick={() => setActiveNav(item.id)} className="w-full flex items-center gap-3 px-3 py-2.5 text-sm transition-all rounded-xl" style={{ color: activeNav === item.id ? "#fff" : "#475569", background: activeNav === item.id ? "rgba(79,70,229,0.25)" : "transparent" }}>
+            <button
+              key={item.id}
+              onClick={() => setActiveNav(item.id)}
+              className="w-full flex items-center gap-3 px-3 py-2.5 text-sm transition-all rounded-xl"
+              style={{
+                color: activeNav === item.id ? "#fff" : "#475569",
+                background: activeNav === item.id ? "rgba(79,70,229,0.25)" : "transparent",
+              }}
+            >
               <span style={{ color: activeNav === item.id ? "#818cf8" : "#475569" }}>{item.icon}</span>
               {sidebarOpen && <span className="font-semibold">{item.label}</span>}
             </button>
@@ -688,7 +859,12 @@ export default function App() {
         </nav>
 
         <div className="px-2 pb-4">
-          <button onClick={() => { loadKanban(true); showToast("Atualizando quadro...", "loading"); setTimeout(() => showToast("Quadro atualizado!", "success"), 800); }} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all" style={{ color: "#475569" }} title="Recarregar">
+          <button
+            onClick={() => { loadKanban(true); showToast("Atualizando quadro...", "loading"); setTimeout(() => showToast("Quadro atualizado!", "success"), 800); }}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all"
+            style={{ color: "#475569" }}
+            title="Recarregar"
+          >
             <RefreshCw size={18} style={{ color: "#475569" }} />
             {sidebarOpen && <span className="text-sm font-semibold">Atualizar</span>}
           </button>
@@ -698,27 +874,48 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <header className="h-16 shrink-0 flex items-center justify-between px-6 bg-white shadow-sm" style={{ borderBottom: "1px solid #e2e8f0" }}>
           <div className="flex items-center gap-4">
-            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-xl hover:bg-slate-100 text-slate-400 transition-colors"><Menu size={18} /></button>
+            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-xl hover:bg-slate-100 text-slate-400 transition-colors">
+              <Menu size={18} />
+            </button>
             <div>
               <h1 className="text-base font-black text-[#0f172a]">Quadro Kanban</h1>
-              <p className="text-xs text-slate-400 font-medium">{totalTasks} cards · {concludedCount} concluídos</p>
+              <p className="text-xs text-slate-400 font-medium">
+                {totalTasks} cards · {concludedCount} concluídos
+              </p>
             </div>
           </div>
 
           <div className="flex items-center gap-3">
             <div className="relative">
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="ID, Ionix, Cluster..." className="pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-xl bg-slate-50 w-52 focus:outline-none focus:border-indigo-300 transition-colors" />
+              <input
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="ID, Ionix, Cluster..."
+                className="pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-xl bg-slate-50 w-52 focus:outline-none focus:border-indigo-300 transition-colors"
+              />
             </div>
 
             <div className="relative">
-              <button onClick={() => setFilterOpen(!filterOpen)} className="flex items-center gap-2 px-3 py-2 text-sm font-semibold border border-slate-200 rounded-xl bg-slate-50 text-slate-600 hover:border-indigo-300 transition-colors">
-                <Filter size={13} /> <span>{filterAssignee}</span> <ChevronDown size={12} />
+              <button
+                onClick={() => filterOpen ? setFilterOpen(false) : setFilterOpen(true)}
+                className="flex items-center gap-2 px-3 py-2 text-sm font-semibold border border-slate-200 rounded-xl bg-slate-50 text-slate-600 hover:border-indigo-300 transition-colors"
+              >
+                <Filter size={13} />
+                <span>{filterAssignee}</span>
+                <ChevronDown size={12} />
               </button>
               {filterOpen && (
                 <div className="absolute right-0 top-full mt-1.5 bg-white border border-slate-100 rounded-2xl shadow-xl z-30 py-1.5 min-w-[170px]">
                   {["Todos", ...COLLABORATORS.map(c => c.name)].map(name => (
-                    <button key={name} onClick={() => { setFilterAssignee(name); setFilterOpen(false); }} className="w-full text-left px-4 py-2 text-sm font-medium hover:bg-slate-50 transition-colors" style={{ color: filterAssignee === name ? "#4f46e5" : "#334155" }}>{name}</button>
+                    <button
+                      key={name}
+                      onClick={() => { setFilterAssignee(name); setFilterOpen(false); }}
+                      className="w-full text-left px-4 py-2 text-sm font-medium hover:bg-slate-50 transition-colors"
+                      style={{ color: filterAssignee === name ? "#4f46e5" : "#334155" }}
+                    >
+                      {name}
+                    </button>
                   ))}
                 </div>
               )}
@@ -733,7 +930,9 @@ export default function App() {
                 <div className="flex items-center gap-2 mb-3 px-1">
                   <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: col.color }} />
                   <span className="text-sm font-black text-[#0f172a]">{col.title}</span>
-                  <span className="text-[10px] font-black px-2 py-0.5 rounded-full ml-auto" style={{ background: col.accent, color: col.color }}>{col.tasks.length}</span>
+                  <span className="text-[10px] font-black px-2 py-0.5 rounded-full ml-auto" style={{ background: col.accent, color: col.color }}>
+                    {col.tasks.length}
+                  </span>
                 </div>
 
                 <div
@@ -750,7 +949,8 @@ export default function App() {
                 >
                   {col.tasks.length === 0 && (
                     <div className="flex flex-col items-center justify-center py-10 rounded-2xl border-2 border-dashed border-slate-200 text-slate-300">
-                      <CheckCircle size={22} /> <p className="text-xs font-semibold mt-2">Vazio</p>
+                      <CheckCircle size={22} />
+                      <p className="text-xs font-semibold mt-2">Vazio</p>
                     </div>
                   )}
                   {col.tasks.map(task => {
@@ -777,10 +977,15 @@ export default function App() {
                             <div className="flex items-center justify-between gap-2 mb-2.5">
                               <div className="flex items-center gap-1.5 min-w-0">
                                 <span className="text-sm font-black text-[#0f172a] truncate leading-tight">{task.title}</span>
-                                {isDuplicate && <span className="shrink-0 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#b45309", border: "1px solid #f59e0b" }}>ID dup.</span>}
+                                {isDuplicate && (
+                                  <span className="shrink-0 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#b45309", border: "1px solid #f59e0b" }}>
+                                    ID dup.
+                                  </span>
+                                )}
                               </div>
                               <span className="flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded-full shrink-0" style={{ background: prio.bg, color: prio.text }}>
-                                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: prio.dot }} /> {prio.label}
+                                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: prio.dot }} />
+                                {prio.label}
                               </span>
                             </div>
 
@@ -803,14 +1008,26 @@ export default function App() {
 
                             {task.tags.length > 0 && (
                               <div className="flex flex-wrap gap-1 mb-3">
-                                {task.tags.map(tag => <span key={tag} className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#92400e" }}>{tag}</span>)}
+                                {task.tags.map(tag => (
+                                  <span key={tag} className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#92400e" }}>{tag}</span>
+                                ))}
                               </div>
                             )}
 
                             <div className="flex items-center justify-between pt-2.5" style={{ borderTop: "1px solid #f1f5f9" }}>
                               <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
-                                <div className="w-6 h-6 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0 ring-2 ring-white" style={{ background: meta.color }} title={task.assignee}>{meta.initials}</div>
-                                <select value={task.assignee} onChange={e => handleAssigneeChange(task.id, e.target.value)} className="text-[10px] font-semibold border-none bg-transparent text-slate-500 cursor-pointer focus:outline-none max-w-[90px]">
+                                <div
+                                  className="w-6 h-6 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0 ring-2 ring-white"
+                                  style={{ background: meta.color }}
+                                  title={task.assignee}
+                                >
+                                  {meta.initials}
+                                </div>
+                                <select
+                                  value={task.assignee}
+                                  onChange={e => handleAssigneeChange(task.id, e.target.value)}
+                                  className="text-[10px] font-semibold border-none bg-transparent text-slate-500 cursor-pointer focus:outline-none max-w-[90px]"
+                                >
                                   <option value="Não atribuído">Sem perfil</option>
                                   {COLLABORATORS.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
                                 </select>
@@ -818,10 +1035,29 @@ export default function App() {
 
                               <div onClick={e => e.stopPropagation()}>
                                 {col.id !== "concluido" ? (
-                                  <button onClick={() => handleCompleteTask(col.id, task.id)} className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white" style={{ background: "linear-gradient(135deg, #10b981, #059669)" }}><CheckCircle size={11} /> Concluir</button>
+                                  <button
+                                    onClick={() => handleCompleteTask(col.id, task.id)}
+                                    className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white"
+                                    style={{ background: "linear-gradient(135deg, #10b981, #059669)" }}
+                                  >
+                                    <CheckCircle size={11} /> Concluir
+                                  </button>
                                 ) : (
                                   <div className="flex items-center gap-1.5">
-                                    <button onClick={() => handleReturnTask(col.id, task.id)} className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white" style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}><RefreshCw size={11} /> Retornar</button>
+                                    <button
+                                      onClick={() => handleReturnTask(col.id, task.id)}
+                                      className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all text-white"
+                                      style={{ background: "linear-gradient(135deg, #6366f1, #4f46e5)" }}
+                                    >
+                                      <RefreshCw size={11} /> Retornar
+                                    </button>
+                                    <button
+                                      onClick={() => { if (confirm("Deletar permanentemente?")) handleRemoveFromCompleted(col.id, task.id); }}
+                                      className="flex items-center gap-1 text-[10px] font-black px-2.5 py-1.5 rounded-lg transition-all"
+                                      style={{ background: "#fff1f2", color: "#e11d48" }}
+                                    >
+                                      <Trash2 size={11} /> Remover
+                                    </button>
                                   </div>
                                 )}
                               </div>
