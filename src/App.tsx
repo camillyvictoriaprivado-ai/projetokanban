@@ -52,7 +52,8 @@ interface KanbanTask {
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
 function getPersistKey(task: KanbanTask): string {
-  return `task:${task.id}`;
+  // Usa o title (ID real da planilha) como chave estável, independente de coluna ou timestamp no ID do React
+  return `task:${task.title || task.id}`;
 }
 
 function getCollabMeta(name: string) {
@@ -832,9 +833,24 @@ export default function App() {
     }
     if (!taskToMove) { setDragState(null); setDragOverCol(null); return; }
 
+
     // Ao soltar o card, reformulamos o ID único do React para conter a nova coluna de destino
     const targetTaskId = `${toColId}-${taskToMove.title}-${Date.now()}`;
-    const preparedTask = { ...taskToMove, id: targetTaskId };
+
+    // Recupera annotations e assignee salvos pela chave estável (title) para não perder ao mover
+    let _savedAnnotations: Record<string, Annotation[]> = {};
+    try { _savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
+    const _stableKey = `task:${taskToMove.title}`;
+    const _savedAnns = _savedAnnotations[_stableKey] ?? taskToMove.annotations;
+
+    const preparedTask: KanbanTask = {
+      ...taskToMove,
+      id: targetTaskId,
+      annotations: _savedAnns,
+      assignee: taskToMove.assignee || "Não atribuído",
+      assigneeInitials: taskToMove.assigneeInitials,
+      assigneeColor: taskToMove.assigneeColor,
+    };
 
     setColumns(prev => {
       const withoutTask = prev.map(col =>
