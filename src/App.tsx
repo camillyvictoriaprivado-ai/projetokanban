@@ -45,6 +45,8 @@ interface KanbanTask {
   annotations: Annotation[]; previousColumnId?: string;
   rowkey?: string; // chave única da linha na planilha
   sourceColumn?: string; // aba de origem no Sheets
+  codigoMaterial?: string; // código do material (aba "codigo")
+  saldoEstoque?: string | number; // saldo no estoque para o cluster (aba "estoque")
 }
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
@@ -251,6 +253,8 @@ function TaskDetailModal({
                   { icon: <FileText size={12} />,   label: "Material",    value: local.material || "—" },
                   { icon: <ClipboardList size={12} />, label: "Quantidade", value: local.quantidade || "—" },
                   { icon: <Calendar size={12} />,   label: "Vencimento",  value: local.dueDate || "—" },
+                  ...(local.codigoMaterial !== undefined ? [{ icon: <Tag size={12} />, label: "Código", value: local.codigoMaterial }] : []),
+                  ...(local.saldoEstoque !== undefined ? [{ icon: <BarChart3 size={12} />, label: "Saldo em Estoque", value: String(local.saldoEstoque) }] : []),
                 ].map(row => (
                   <div key={row.label} className="flex items-start gap-2.5 rounded-2xl px-3.5 py-3 border border-gray-100" style={{ background: "#f8fafc" }}>
                     <span className="mt-0.5 text-indigo-400 shrink-0">{row.icon}</span>
@@ -565,6 +569,8 @@ export default function App() {
               checklist: [],
               subtasks: [],
               annotations: [],
+              codigoMaterial: task.codigo_material !== undefined && task.codigo_material !== null ? String(task.codigo_material) : undefined,
+              saldoEstoque: task.saldo_estoque !== undefined && task.saldo_estoque !== null ? task.saldo_estoque : undefined,
             };
             const key = getPersistKey(builtTask);
             builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
