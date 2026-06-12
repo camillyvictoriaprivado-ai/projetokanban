@@ -43,6 +43,8 @@ interface KanbanTask {
   assigneeInitials: string; assigneeColor: string; priority: Priority; dueDate: string; 
   steps: Step[]; tags: string[]; checklist: ChecklistItem[]; subtasks: Subtask[]; 
   annotations: Annotation[]; previousColumnId?: string;
+  rowkey?: string; // chave única da linha na planilha
+  sourceColumn?: string; // aba de origem no Sheets
 }
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
@@ -536,15 +538,17 @@ export default function App() {
           rawTasks.forEach((task: any, index: number) => {
             if (!task) return;
             
-            // 🌟 ULTRA BLINDAGEM: Criamos um ID composto que une Coluna + ID do Sheets + Linha.
-            // Isso impede que múltiplos cards com o mesmo número de ID fiquem idênticos para o React.
+            // ID único: usa rowkey da planilha se existir, senão fallback para col+id+index
             const rawId = task.id ? String(task.id) : `task`;
-            const uniqueId = `${col.id}-${rawId}-${index}`;
+            const rowkey = task.rowkey ? String(task.rowkey) : null;
+            const uniqueId = rowkey ? `${col.id}-rk${rowkey}` : `${col.id}-${rawId}-${index}`;
 
             const meta = getCollabMeta(task.assignee || "Não atribuído");
             const builtTask: KanbanTask = {
               id: uniqueId, 
-              title: rawId, // Mantém o ID original limpo visível no card
+              title: rawId,
+              rowkey: rowkey ?? undefined,
+              sourceColumn: col.id,
               ionix: task.ionix || task.description?.match(/Ionix[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
               cluster: task.cluster || task.description?.match(/Cluster[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
               uf: task.uf || task.description?.match(/UF[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
@@ -729,7 +733,12 @@ export default function App() {
     showToast("Enviando para o Sheets...", "loading");
 
     try {
-      const cleanTask = { ...taskToMove!, id: taskToMove!.title };
+      const cleanTask = { 
+        ...taskToMove!, 
+        id: taskToMove!.title,
+        rowkey: taskToMove!.rowkey,
+        sourceColumn: taskToMove!.sourceColumn,
+      };
       const res = await fetch(API_URL, {
         method: "POST",
         body: JSON.stringify({ action: "updateTask", task: cleanTask, targetColumn: "concluido" }),
@@ -789,7 +798,12 @@ export default function App() {
     showToast("Tarefa retornada!", "success");
     persistColumnPos(finalTask, targetColId);
     
-    const cleanTask = { ...taskToReturn, id: taskToReturn.title };
+    const cleanTask = { 
+      ...taskToReturn, 
+      id: taskToReturn.title,
+      rowkey: taskToReturn.rowkey,
+      sourceColumn: taskToReturn.sourceColumn,
+    };
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: cleanTask, targetColumn: targetColId }) }).catch(() => {});
   };
 
@@ -837,7 +851,12 @@ export default function App() {
     persistColumnPos(preparedTask, toColId);
 
     const apiAction = toColId === "acaost" ? "createActionST" : "updateTask";
-    const cleanTask = { ...preparedTask, id: preparedTask.title };
+    const cleanTask = { 
+      ...preparedTask, 
+      id: preparedTask.title,
+      rowkey: taskToMove.rowkey,
+      sourceColumn: taskToMove.sourceColumn,
+    };
     
     fetch(API_URL, { 
       method: "POST", 
