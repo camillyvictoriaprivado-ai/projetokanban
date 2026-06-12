@@ -7,7 +7,7 @@ import {
   RefreshCw, AlertCircle, Zap
 } from "lucide-react";
 
-const API_URL = "https://script.google.com/macros/s/AKfycby3gbXGsmKv3tWlovgf89n1RZkmgFoBEeK7-TP93c-bK4C0RCdGcVWtOcuHaHPU0p2VMg/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbzRN6LZWIgtuZ7IXkuc4-zP-vOoFSmeqQPEAYpzuVgdEGQX9eCiLIMAd2jWFZgoy9SdFA/exec";
 
 // ─── CONFIGURAÇÃO DO ABLY ───
 const ABLY_API_KEY = "BUp6Lg.QfvVuw:DBQaijX7rEyBdz4A1dXnrDXE68wWcCWkQTUG_BLSk9E"; 
@@ -52,8 +52,7 @@ interface KanbanTask {
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
 function getPersistKey(task: KanbanTask): string {
-  // Usa o title (ID real da planilha) como chave estável, independente de coluna ou timestamp no ID do React
-  return `task:${task.title || task.id}`;
+  return `task:${task.id}`;
 }
 
 function getCollabMeta(name: string) {
@@ -833,24 +832,9 @@ export default function App() {
     }
     if (!taskToMove) { setDragState(null); setDragOverCol(null); return; }
 
-
     // Ao soltar o card, reformulamos o ID único do React para conter a nova coluna de destino
     const targetTaskId = `${toColId}-${taskToMove.title}-${Date.now()}`;
-
-    // Recupera annotations e assignee salvos pela chave estável (title) para não perder ao mover
-    let _savedAnnotations: Record<string, Annotation[]> = {};
-    try { _savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
-    const _stableKey = `task:${taskToMove.title}`;
-    const _savedAnns = _savedAnnotations[_stableKey] ?? taskToMove.annotations;
-
-    const preparedTask: KanbanTask = {
-      ...taskToMove,
-      id: targetTaskId,
-      annotations: _savedAnns,
-      assignee: taskToMove.assignee || "Não atribuído",
-      assigneeInitials: taskToMove.assigneeInitials,
-      assigneeColor: taskToMove.assigneeColor,
-    };
+    const preparedTask = { ...taskToMove, id: targetTaskId };
 
     setColumns(prev => {
       const withoutTask = prev.map(col =>
