@@ -7,7 +7,7 @@ import {
   RefreshCw, AlertCircle, Zap
 } from "lucide-react";
 
-const API_URL = "https://script.google.com/macros/s/AKfycbwrNNlyRWYq5zayRYSlRfRSC_bFY7tjc4DXxL6TF3YSnHwMOw_h7HY2wF6qFW3MSQsXBQ/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycby3gbXGsmKv3tWlovgf89n1RZkmgFoBEeK7-TP93c-bK4C0RCdGcVWtOcuHaHPU0p2VMg/exec";
 
 // ─── CONFIGURAÇÃO DO ABLY ───
 const ABLY_API_KEY = "BUp6Lg.QfvVuw:DBQaijX7rEyBdz4A1dXnrDXE68wWcCWkQTUG_BLSk9E"; 
