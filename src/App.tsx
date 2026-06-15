@@ -4,7 +4,7 @@ import {
   LayoutGrid, Users, BarChart3, Settings, Search, Filter, ChevronDown,
   Menu, CheckCircle, X, Plus, Trash2, ChevronRight, Calendar, User,
   Tag, FileText, ClipboardList, MessageSquare, Circle, CheckCircle2,
-  RefreshCw, AlertCircle, Zap
+  RefreshCw, AlertCircle, Zap, Package
 } from "lucide-react";
 
 const API_URL = "https://script.google.com/macros/s/AKfycbzRN6LZWIgtuZ7IXkuc4-zP-vOoFSmeqQPEAYpzuVgdEGQX9eCiLIMAd2jWFZgoy9SdFA/exec";
@@ -485,6 +485,223 @@ function TaskDetailModal({
               </div>
             </div>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── TELA DE ESTOQUE ───
+interface EstoqueItem {
+  codigo: string;
+  material: string;
+  saldo: number | string;
+  um: string;
+  lote: string;
+  centro: string;
+  deposito: string;
+  cluster: string;
+}
+
+function EstoqueView() {
+  const [items, setItems] = useState<EstoqueItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [filterCluster, setFilterCluster] = useState("Todos");
+  const [sortBy, setSortBy] = useState<"material" | "saldo" | "cluster">("material");
+  const [sortAsc, setSortAsc] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(API_URL)
+      .then(r => r.text())
+      .then(text => {
+        if (!text.trim().startsWith("{")) throw new Error("Resposta inválida da API");
+        const data = JSON.parse(text);
+        
+        // Debug: loga todas as chaves disponíveis no retorno da API
+        console.log("🔑 Chaves disponíveis na API:", Object.keys(data));
+        
+        // Tenta encontrar a aba de estoque ignorando maiúsculas/minúsculas
+        const estoqueKey = Object.keys(data).find(k => k.toLowerCase() === "estoque");
+        console.log("📦 Chave de estoque encontrada:", estoqueKey);
+        
+        const raw = estoqueKey ? data[estoqueKey] : [];
+        console.log("📋 Itens de estoque:", raw?.length, raw?.[0]);
+        
+        if (!Array.isArray(raw) || raw.length === 0) {
+          throw new Error(`A aba 'estoque' não está sendo exportada pelo backend.\n\nAdicione no doGet do Apps Script:\n  const estoqueSheet = getSheetByColumnId(ss, "estoque");\n  if (estoqueSheet) data["estoque"] = getTasksFromSheet(estoqueSheet);`);
+        }
+        setItems(raw.map((r: any) => ({
+          codigo:   String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? "—"),
+          material: String(r.material ?? r.Material ?? r.MATERIAL ?? "—"),
+          saldo:    r.saldo    ?? r.Saldo    ?? r.SALDO    ?? 0,
+          um:       String(r.um       ?? r.UM       ?? r.Um       ?? "—"),
+          lote:     String(r.lote     ?? r.Lote     ?? r.LOTE     ?? "—"),
+          centro:   String(r.centro   ?? r.Centro   ?? r.CENTRO   ?? "—"),
+          deposito: String(r.deposito ?? r.Deposito ?? r.DEPOSITO ?? r.depósito ?? "—"),
+          cluster:  String(r.cluster  ?? r.Cluster  ?? r.CLUSTER  ?? "—"),
+        })));
+      })
+      .catch(e => { console.error("❌ Erro estoque:", e); setError(e.message); })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const clusters = useMemo(() => ["Todos", ...Array.from(new Set(items.map(i => i.cluster).filter(c => c && c !== "—")))], [items]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return items
+      .filter(i => {
+        const matchCluster = filterCluster === "Todos" || i.cluster === filterCluster;
+        const matchSearch = !q || i.material.toLowerCase().includes(q) || i.codigo.toLowerCase().includes(q) || i.cluster.toLowerCase().includes(q);
+        return matchCluster && matchSearch;
+      })
+      .sort((a, b) => {
+        let va: any = a[sortBy];
+        let vb: any = b[sortBy];
+        if (sortBy === "saldo") { va = Number(va) || 0; vb = Number(vb) || 0; }
+        else { va = String(va).toLowerCase(); vb = String(vb).toLowerCase(); }
+        return sortAsc ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
+      });
+  }, [items, search, filterCluster, sortBy, sortAsc]);
+
+  const totalSaldo = useMemo(() => filtered.reduce((acc, i) => acc + (Number(i.saldo) || 0), 0), [filtered]);
+  const semEstoque = filtered.filter(i => Number(i.saldo) <= 0).length;
+
+  const toggleSort = (col: typeof sortBy) => {
+    if (sortBy === col) setSortAsc(a => !a);
+    else { setSortBy(col); setSortAsc(true); }
+  };
+
+  if (loading) return (
+    <div className="flex-1 flex items-center justify-center" style={{ background: "#f1f5f9" }}>
+      <div className="flex items-center gap-2 text-slate-400 text-sm font-semibold">
+        <RefreshCw size={14} className="animate-spin text-indigo-400" /> Carregando estoque...
+      </div>
+    </div>
+  );
+
+  if (error) return (
+    <div className="flex-1 flex items-center justify-center" style={{ background: "#f1f5f9" }}>
+      <div className="text-center">
+        <AlertCircle size={28} className="mx-auto mb-2 text-rose-400" />
+        <p className="text-sm font-bold text-slate-600">{error}</p>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden" style={{ background: "#f1f5f9" }}>
+      {/* Header da tela */}
+      <div className="px-6 pt-5 pb-4 bg-white border-b border-slate-100 shrink-0">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-base font-black text-[#0f172a]">Estoque</h2>
+            <p className="text-xs text-slate-400 mt-0.5">{filtered.length} itens · saldo total: <span className="font-bold text-indigo-600">{totalSaldo.toLocaleString("pt-BR")}</span> · <span className="text-rose-500 font-bold">{semEstoque} sem estoque</span></p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Search */}
+            <div className="relative">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Código, material..."
+                className="pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-xl bg-slate-50 w-44 focus:outline-none focus:border-indigo-300"
+              />
+            </div>
+            {/* Cluster filter */}
+            <select
+              value={filterCluster}
+              onChange={e => setFilterCluster(e.target.value)}
+              className="text-sm border border-slate-200 rounded-xl bg-slate-50 px-3 py-2 focus:outline-none focus:border-indigo-300 text-slate-600 font-semibold"
+            >
+              {clusters.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Tabela */}
+      <div className="flex-1 overflow-auto px-6 py-4">
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                {[
+                  { label: "Código",    key: null },
+                  { label: "Material",  key: "material" as const },
+                  { label: "Saldo",     key: "saldo" as const },
+                  { label: "UM",        key: null },
+                  { label: "Lote",      key: null },
+                  { label: "Centro",    key: null },
+                  { label: "Depósito",  key: null },
+                  { label: "Cluster",   key: "cluster" as const },
+                ].map(col => (
+                  <th
+                    key={col.label}
+                    onClick={() => col.key && toggleSort(col.key)}
+                    className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 select-none"
+                    style={{ cursor: col.key ? "pointer" : "default", whiteSpace: "nowrap" }}
+                  >
+                    <span className="flex items-center gap-1">
+                      {col.label}
+                      {col.key && sortBy === col.key && (
+                        <span className="text-indigo-400">{sortAsc ? "↑" : "↓"}</span>
+                      )}
+                    </span>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="text-center py-12 text-slate-300 text-sm font-semibold">
+                    Nenhum item encontrado
+                  </td>
+                </tr>
+              )}
+              {filtered.map((item, i) => {
+                const saldoNum = Number(item.saldo) || 0;
+                const semSaldo = saldoNum <= 0;
+                return (
+                  <tr
+                    key={`${item.codigo}-${item.cluster}-${i}`}
+                    className="border-t border-slate-50 hover:bg-slate-50 transition-colors"
+                    style={{ background: semSaldo ? "#fff8f8" : undefined }}
+                  >
+                    <td className="px-4 py-3 font-mono text-xs text-slate-500">{item.codigo}</td>
+                    <td className="px-4 py-3 font-semibold text-[#0f172a] max-w-[220px]">
+                      <span className="truncate block" title={item.material}>{item.material}</span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className="inline-flex items-center font-black text-xs px-2.5 py-1 rounded-lg"
+                        style={{
+                          background: semSaldo ? "#fee2e2" : saldoNum < 10 ? "#fffbeb" : "#f0fdf4",
+                          color:      semSaldo ? "#dc2626" : saldoNum < 10 ? "#d97706" : "#059669",
+                        }}
+                      >
+                        {saldoNum.toLocaleString("pt-BR")}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-500">{item.um}</td>
+                    <td className="px-4 py-3 text-xs text-slate-500 font-mono">{item.lote}</td>
+                    <td className="px-4 py-3 text-xs text-slate-500">{item.centro}</td>
+                    <td className="px-4 py-3 text-xs text-slate-500">{item.deposito}</td>
+                    <td className="px-4 py-3">
+                      <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-600">
+                        {item.cluster}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -1261,10 +1478,11 @@ export default function App() {
   }, [columns]);
 
   const navItems = [
-    { id: "kanban",        label: "Kanban",       icon: <LayoutGrid size={18} /> },
-    { id: "colaboradores", label: "Colaboradores", icon: <Users size={18} /> },
-    { id: "relatorios",    label: "Relatórios",    icon: <BarChart3 size={18} /> },
-    { id: "configuracoes", label: "Configurações", icon: <Settings size={18} /> },
+    { id: "kanban",        label: "Kanban",        icon: <LayoutGrid size={18} /> },
+    { id: "colaboradores", label: "Colaboradores",  icon: <Users size={18} /> },
+    { id: "relatorios",    label: "Relatórios",     icon: <BarChart3 size={18} /> },
+    { id: "estoque",       label: "Estoque",        icon: <Package size={18} /> },
+    { id: "configuracoes", label: "Configurações",  icon: <Settings size={18} /> },
   ];
 
   const totalTasks = columns.reduce((a, c) => a + c.tasks.length, 0);
@@ -1356,7 +1574,7 @@ export default function App() {
             </button>
             <div>
               <h1 className="text-base font-black text-[#0f172a]">
-                {activeNav === "kanban" ? "Quadro Live (Ably)" : activeNav === "colaboradores" ? "Colaboradores" : activeNav === "relatorios" ? "Relatórios" : "Configurações"}
+                {activeNav === "kanban" ? "Quadro Live (Ably)" : activeNav === "colaboradores" ? "Colaboradores" : activeNav === "relatorios" ? "Relatórios" : activeNav === "estoque" ? "Estoque" : "Configurações"}
               </h1>
               <p className="text-xs text-slate-400 font-medium">
                 {totalTasks} cards · {concludedCount} concluídos
@@ -1404,6 +1622,7 @@ export default function App() {
 
         {activeNav === "colaboradores" && <ColaboradoresView columns={columns} />}
         {activeNav === "relatorios" && <RelatoriosView columns={columns} />}
+        {activeNav === "estoque" && <EstoqueView />}
         {activeNav === "configuracoes" && (
           <div className="flex-1 flex items-center justify-center text-slate-400 text-sm font-semibold">
             <div className="text-center">
