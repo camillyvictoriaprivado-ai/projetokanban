@@ -4,8 +4,12 @@ import {
   LayoutGrid, Users, BarChart3, Settings, Search, Filter, ChevronDown,
   Menu, CheckCircle, X, Plus, Trash2, ChevronRight, Calendar, User,
   Tag, FileText, ClipboardList, MessageSquare, Circle, CheckCircle2,
-  RefreshCw, AlertCircle, Zap
+  RefreshCw, AlertCircle, Zap, LogOut
 } from "lucide-react";
+import type { User as FirebaseUser } from "firebase/auth";
+import { useAuth }     from "./useAuth";
+import { useUserData } from "./useUserData";
+import LoginPage       from "./LoginPage";
 
 const API_URL = "https://script.google.com/macros/s/AKfycbzRN6LZWIgtuZ7IXkuc4-zP-vOoFSmeqQPEAYpzuVgdEGQX9eCiLIMAd2jWFZgoy9SdFA/exec";
 
@@ -32,9 +36,9 @@ type Priority = "alta" | "média" | "baixa";
 type StepStatus = "pendente" | "em andamento" | "concluído";
 type SubtaskStatus = "pendente" | "em andamento" | "concluído";
 
-interface ChecklistItem { id: string; label: string; done: boolean; }
-interface Subtask { id: string; title: string; assignee: string; status: SubtaskStatus; }
-interface Annotation { id: string; text: string; createdAt: string; }
+interface ChecklistItem { id: string; label: string; done: boolean; author?: string; }
+interface Subtask { id: string; title: string; assignee: string; status: SubtaskStatus; author?: string; }
+interface Annotation { id: string; text: string; createdAt: string; author?: string; }
 interface Step { id: string; label: string; status: StepStatus; }
 
 interface KanbanTask {
@@ -109,9 +113,9 @@ function Toast({ message, type, onDismiss }: { message: string; type: "success" 
 }
 
 function TaskDetailModal({
-  task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn,
+  task, columnId, currentUserName, onClose, onUpdate, onComplete, onRemove, onReturn,
 }: {
-  task: KanbanTask; columnId: string; onClose: () => void;
+  task: KanbanTask; columnId: string; currentUserName: string; onClose: () => void;
   onUpdate: (u: KanbanTask) => void;
   onComplete: (colId: string, taskId: string) => void;
   onRemove: (colId: string, taskId: string) => void;
@@ -136,7 +140,7 @@ function TaskDetailModal({
 
   const addCheckItem = () => {
     if (!newCheckItem.trim()) return;
-    save({ ...local, checklist: [...local.checklist, { id: `chk-${Date.now()}`, label: newCheckItem.trim(), done: false }] });
+    save({ ...local, checklist: [...local.checklist, { id: `chk-${Date.now()}`, label: newCheckItem.trim(), done: false, author: currentUserName }] });
     setNewCheckItem("");
   };
   const toggleCheck = (id: string) => save({ ...local, checklist: local.checklist.map(c => c.id === id ? { ...c, done: !c.done } : c) });
@@ -144,7 +148,7 @@ function TaskDetailModal({
 
   const addSubtask = () => {
     if (!newSubtask.title.trim()) return;
-    save({ ...local, subtasks: [...local.subtasks, { id: `sub-${Date.now()}`, ...newSubtask }] });
+    save({ ...local, subtasks: [...local.subtasks, { id: `sub-${Date.now()}`, ...newSubtask, author: currentUserName }] });
     setNewSubtask({ title: "", assignee: "", status: "pendente" });
     setShowSubtaskForm(false);
   };
@@ -153,7 +157,7 @@ function TaskDetailModal({
 
   const addNote = () => {
     if (!newNote.trim()) return;
-    save({ ...local, annotations: [...local.annotations, { id: `ann-${Date.now()}`, text: newNote.trim(), createdAt: new Date().toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" }) }] });
+    save({ ...local, annotations: [...local.annotations, { id: `ann-${Date.now()}`, text: newNote.trim(), createdAt: new Date().toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" }), author: currentUserName }] });
     setNewNote("");
   };
   const removeNote = (id: string) => save({ ...local, annotations: local.annotations.filter(a => a.id !== id) });
@@ -345,6 +349,9 @@ function TaskDetailModal({
                           {item.done ? <CheckCircle2 size={18} className="text-emerald-500" /> : <Circle size={18} className="text-gray-300 group-hover:text-indigo-300 transition-colors" />}
                         </button>
                         <span className={`flex-1 text-sm ${item.done ? "line-through text-gray-400" : "font-medium text-[#0f172a]"}`}>{item.label}</span>
+                        {item.author && (
+                          <span className="text-[9px] font-bold text-[#94a3b8] shrink-0">{item.author}</span>
+                        )}
                         <button onClick={() => removeCheck(item.id)} className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-rose-500 transition-all">
                           <Trash2 size={13} />
                         </button>
@@ -376,7 +383,10 @@ function TaskDetailModal({
                     <div key={sub.id} className="flex items-center gap-3 px-4 py-2.5 rounded-2xl border border-gray-100 group" style={{ background: "#f8fafc" }}>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-bold text-[#0f172a] truncate">{sub.title}</p>
-                        <p className="text-xs text-[#94a3b8]">{sub.assignee || "Sem responsável"}</p>
+                        <p className="text-xs text-[#94a3b8]">
+                          {sub.assignee || "Sem responsável"}
+                          {sub.author && <span className="ml-1.5 text-[#cbd5e1]">· criado por {sub.author}</span>}
+                        </p>
                       </div>
                       <select
                         value={sub.status}
@@ -423,7 +433,9 @@ function TaskDetailModal({
                   {local.annotations.map(ann => (
                     <div key={ann.id} className="relative rounded-2xl px-4 py-3.5 border border-amber-100 group" style={{ background: "#fffbeb" }}>
                       <p className="text-sm text-[#0f172a] leading-relaxed">{ann.text}</p>
-                      <p className="text-[10px] text-amber-400 mt-1.5 font-medium">{ann.createdAt}</p>
+                      <p className="text-[10px] text-amber-400 mt-1.5 font-medium">
+                        {ann.createdAt}{ann.author && ` · ${ann.author}`}
+                      </p>
                       <button onClick={() => removeNote(ann.id)} className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 text-amber-300 hover:text-rose-500 transition-all">
                         <Trash2 size={12} />
                       </button>
@@ -452,6 +464,25 @@ function TaskDetailModal({
 }
 
 export default function App() {
+  const { user, loading: authLoading, logout } = useAuth();
+
+  // Enquanto verifica a sessão do Firebase, mostra tela em branco
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#16244A]">
+        <div className="w-8 h-8 border-4 border-orange-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  // Se não estiver logado, mostra a tela de login
+  if (!user) return <LoginPage />;
+
+  return <Dashboard user={user} logout={logout} />;
+}
+
+function Dashboard({ user, logout }: { user: FirebaseUser; logout: () => void }) {
+  const { userDataMap, saveTaskData } = useUserData(user);
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterAssignee, setFilterAssignee] = useState<string>("Todos");
@@ -931,6 +962,7 @@ export default function App() {
         <TaskDetailModal
           task={openTask.task}
           columnId={openTask.columnId}
+          currentUserName={user.displayName ?? user.email ?? "Usuário"}
           onClose={() => setOpenTask(null)}
           onUpdate={updateTask}
           onComplete={(colId, taskId) => { handleCompleteTask(colId, taskId); setOpenTask(null); }}
@@ -980,6 +1012,36 @@ export default function App() {
           >
             <RefreshCw size={18} style={{ color: "#475569" }} />
             {sidebarOpen && <span className="text-sm font-semibold">Forçar Recarga</span>}
+          </button>
+        </div>
+
+        <div
+          className="px-2 pb-4 pt-2 flex items-center gap-3"
+          style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
+        >
+          {user.photoURL ? (
+            <img
+              src={user.photoURL}
+              alt={user.displayName ?? "Usuário"}
+              className="w-8 h-8 rounded-full shrink-0 ring-2 ring-white/10"
+            />
+          ) : (
+            <div className="w-8 h-8 rounded-full flex items-center justify-center text-white font-black text-xs shrink-0" style={{ background: "#4f46e5" }}>
+              {(user.displayName ?? user.email ?? "?").substring(0, 1).toUpperCase()}
+            </div>
+          )}
+          {sidebarOpen && (
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-bold text-white truncate">{user.displayName ?? "Usuário"}</p>
+              <p className="text-[10px] text-slate-500 truncate">{user.email}</p>
+            </div>
+          )}
+          <button
+            onClick={logout}
+            title="Sair"
+            className="p-2 rounded-xl hover:bg-white/5 text-slate-500 hover:text-rose-400 transition-colors shrink-0"
+          >
+            <LogOut size={16} />
           </button>
         </div>
       </aside>
