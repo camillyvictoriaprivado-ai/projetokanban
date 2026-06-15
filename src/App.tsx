@@ -451,6 +451,312 @@ function TaskDetailModal({
   );
 }
 
+// ─── TELA DE COLABORADORES ───
+function ColaboradoresView({ columns }: { columns: Column[] }) {
+  const allTasks = columns.flatMap(col => col.tasks.map(t => ({ ...t, colId: col.id, colTitle: col.title, colColor: col.color })));
+
+  const stats = COLLABORATORS.map(c => {
+    const myTasks = allTasks.filter(t => t.colaborador === c.name);
+    const concluded = myTasks.filter(t => t.colId === "concluido").length;
+    const inProgress = myTasks.filter(t => t.colId === "acaost").length;
+    const pending = myTasks.filter(t => t.colId === "semservico").length;
+    const materials = myTasks.filter(t => t.colId === "materiaiscl").length;
+    const baixaOcup = myTasks.filter(t => t.colId === "baixaocupacao").length;
+    const total = myTasks.length;
+    const pct = total > 0 ? Math.round((concluded / total) * 100) : 0;
+    return { ...c, total, concluded, inProgress, pending, materials, baixaOcup, pct, tasks: myTasks };
+  });
+
+  const unassigned = allTasks.filter(t => t.colaborador === "Não atribuído");
+
+  return (
+    <div className="flex-1 overflow-y-auto p-6" style={{ background: "#f1f5f9" }}>
+      <div className="max-w-5xl mx-auto">
+        <div className="mb-6">
+          <h2 className="text-xl font-black text-[#0f172a]">Colaboradores</h2>
+          <p className="text-sm text-slate-400 mt-0.5">Visão geral de carga e desempenho por pessoa</p>
+        </div>
+
+        {/* Cards dos colaboradores */}
+        <div className="grid grid-cols-1 gap-4 mb-6">
+          {stats.map(c => (
+            <div key={c.name} className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+              <div className="flex items-center gap-4 p-5">
+                {/* Avatar */}
+                <div
+                  className="w-12 h-12 rounded-2xl flex items-center justify-center text-white font-black text-base shrink-0"
+                  style={{ background: c.color }}
+                >
+                  {c.initials}
+                </div>
+
+                {/* Nome + barra */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="font-black text-[#0f172a] text-sm">{c.name}</span>
+                    <span className="text-xs font-bold text-slate-500">{c.concluded}/{c.total} concluídos</span>
+                  </div>
+                  <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-500"
+                      style={{ width: `${c.pct}%`, background: c.color }}
+                    />
+                  </div>
+                  <div className="flex gap-3 mt-2">
+                    {[
+                      { label: "Sem serviço", val: c.pending,    bg: "#fee2e2", col: "#ef4444" },
+                      { label: "Mat. CL",     val: c.materials,  bg: "#f7fee7", col: "#84cc16" },
+                      { label: "Ação ST",     val: c.inProgress, bg: "#eff6ff", col: "#3b82f6" },
+                      { label: "Baixa Ocup.", val: c.baixaOcup,  bg: "#fffbeb", col: "#f59e0b" },
+                      { label: "Concluído",   val: c.concluded,  bg: "#f0fdf4", col: "#10b981" },
+                    ].map(s => (
+                      <div key={s.label} className="flex items-center gap-1">
+                        <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md" style={{ background: s.bg, color: s.col }}>
+                          {s.label}: {s.val}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* % */}
+                <div className="shrink-0 text-right">
+                  <div className="text-2xl font-black" style={{ color: c.color }}>{c.pct}%</div>
+                  <div className="text-[10px] font-bold text-slate-400">conclusão</div>
+                </div>
+              </div>
+
+              {/* Lista de tasks */}
+              {c.tasks.length > 0 && (
+                <div className="border-t border-slate-50 px-5 py-3">
+                  <div className="flex flex-wrap gap-2">
+                    {c.tasks.slice(0, 12).map(t => (
+                      <span
+                        key={t.id}
+                        className="text-[10px] font-bold px-2.5 py-1 rounded-lg border"
+                        style={{
+                          background: t.colId === "concluido" ? "#f0fdf4" : "#f8fafc",
+                          color: t.colId === "concluido" ? "#059669" : "#334155",
+                          borderColor: t.colId === "concluido" ? "#bbf7d0" : "#e2e8f0",
+                          textDecoration: t.colId === "concluido" ? "line-through" : "none",
+                        }}
+                      >
+                        #{t.title}
+                      </span>
+                    ))}
+                    {c.tasks.length > 12 && (
+                      <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-slate-100 text-slate-400">
+                        +{c.tasks.length - 12} mais
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Não atribuídos */}
+        {unassigned.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-sm border border-amber-100 p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <AlertCircle size={16} className="text-amber-400" />
+              <span className="font-black text-sm text-[#0f172a]">Sem responsável ({unassigned.length})</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {unassigned.map(t => (
+                <span key={t.id} className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 border border-amber-200">
+                  #{t.title} · {t.colTitle}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── TELA DE RELATÓRIOS ───
+function RelatoriosView({ columns }: { columns: Column[] }) {
+  const allTasks = columns.flatMap(col => col.tasks.map(t => ({ ...t, colId: col.id, colTitle: col.title, colColor: col.color })));
+  const total = allTasks.length;
+  const concluded = allTasks.filter(t => t.colId === "concluido").length;
+  const pending = allTasks.filter(t => t.colId === "semservico").length;
+  const acaoST = allTasks.filter(t => t.colId === "acaost").length;
+  const materiaisCL = allTasks.filter(t => t.colId === "materiaiscl").length;
+  const baixaOcup = allTasks.filter(t => t.colId === "baixaocupacao").length;
+  const conclusionRate = total > 0 ? Math.round((concluded / total) * 100) : 0;
+
+  // Top colaboradores por conclusão
+  const collabRanking = COLLABORATORS.map(c => {
+    const mine = allTasks.filter(t => t.colaborador === c.name);
+    const done = mine.filter(t => t.colId === "concluido").length;
+    return { ...c, total: mine.length, done };
+  }).sort((a, b) => b.done - a.done);
+
+  // Distribuição por coluna
+  const colDist = columns.map(col => ({
+    ...col,
+    count: col.tasks.length,
+    pct: total > 0 ? Math.round((col.tasks.length / total) * 100) : 0,
+  }));
+
+  // Tasks por colaborador por coluna (heatmap simples)
+  const matrix = COLLABORATORS.map(c => ({
+    name: c.name,
+    initials: c.initials,
+    color: c.color,
+    cols: columns.map(col => col.tasks.filter(t => t.colaborador === c.name).length),
+  }));
+
+  return (
+    <div className="flex-1 overflow-y-auto p-6" style={{ background: "#f1f5f9" }}>
+      <div className="max-w-5xl mx-auto space-y-6">
+        <div>
+          <h2 className="text-xl font-black text-[#0f172a]">Relatórios</h2>
+          <p className="text-sm text-slate-400 mt-0.5">Resumo geral do quadro</p>
+        </div>
+
+        {/* KPIs */}
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          {[
+            { label: "Total de cards",    val: total,          bg: "#f8fafc", color: "#0f172a",  accent: "#e2e8f0" },
+            { label: "Concluídos",        val: concluded,      bg: "#f0fdf4", color: "#059669",  accent: "#bbf7d0" },
+            { label: "Ação ST",           val: acaoST,         bg: "#eff6ff", color: "#2563eb",  accent: "#bfdbfe" },
+            { label: "Baixa Ocupação",    val: baixaOcup,      bg: "#fffbeb", color: "#d97706",  accent: "#fde68a" },
+            { label: "Taxa de conclusão", val: `${conclusionRate}%`, bg: "#f5f3ff", color: "#6d28d9", accent: "#ddd6fe" },
+          ].map(kpi => (
+            <div key={kpi.label} className="rounded-2xl p-4 border" style={{ background: kpi.bg, borderColor: kpi.accent }}>
+              <p className="text-[9px] font-black uppercase tracking-widest mb-1" style={{ color: kpi.color, opacity: 0.6 }}>{kpi.label}</p>
+              <p className="text-3xl font-black leading-none" style={{ color: kpi.color }}>{kpi.val}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Distribuição por coluna */}
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
+          <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Distribuição por coluna</h3>
+          <div className="space-y-3">
+            {colDist.map(col => (
+              <div key={col.id} className="flex items-center gap-3">
+                <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: col.color }} />
+                <span className="text-sm font-bold text-[#0f172a] w-32 shrink-0">{col.title}</span>
+                <div className="flex-1 h-3 rounded-full overflow-hidden" style={{ background: col.accent }}>
+                  <div
+                    className="h-full rounded-full transition-all duration-700"
+                    style={{ width: `${col.pct}%`, background: col.color }}
+                  />
+                </div>
+                <span className="text-xs font-black text-slate-500 w-12 text-right">{col.count} cards</span>
+                <span className="text-[10px] font-bold text-slate-400 w-8 text-right">{col.pct}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {/* Ranking colaboradores */}
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
+            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Ranking por conclusão</h3>
+            <div className="space-y-3">
+              {collabRanking.map((c, i) => (
+                <div key={c.name} className="flex items-center gap-3">
+                  <span className="text-[10px] font-black text-slate-300 w-4">{i + 1}</span>
+                  <div className="w-7 h-7 rounded-xl flex items-center justify-center text-white font-black text-[10px] shrink-0" style={{ background: c.color }}>
+                    {c.initials}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-bold text-[#0f172a] truncate">{c.name}</p>
+                    <p className="text-[10px] text-slate-400">{c.done} de {c.total} concluídos</p>
+                  </div>
+                  <div className="h-1.5 w-16 rounded-full bg-slate-100 overflow-hidden">
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        width: `${c.total > 0 ? Math.round((c.done / c.total) * 100) : 0}%`,
+                        background: c.color,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Matriz colaborador × coluna */}
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 overflow-x-auto">
+            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Cards por coluna</h3>
+            <table className="w-full text-xs">
+              <thead>
+                <tr>
+                  <th className="text-left font-black text-[9px] uppercase tracking-wider text-slate-400 pb-2 pr-2">Pessoa</th>
+                  {columns.map(col => (
+                    <th key={col.id} className="text-center font-black text-[9px] uppercase tracking-wider pb-2 px-1" style={{ color: col.color }}>
+                      {col.title.split(" ")[0]}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {matrix.map(row => (
+                  <tr key={row.name} className="border-t border-slate-50">
+                    <td className="py-2 pr-2">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-5 h-5 rounded-lg flex items-center justify-center text-white font-black text-[8px]" style={{ background: row.color }}>
+                          {row.initials}
+                        </div>
+                        <span className="font-semibold text-slate-600 text-[11px]">{row.name.split(" ")[0]}</span>
+                      </div>
+                    </td>
+                    {row.cols.map((count, ci) => (
+                      <td key={ci} className="text-center py-2 px-1">
+                        {count > 0 ? (
+                          <span
+                            className="inline-block w-6 h-6 rounded-lg font-black text-[11px] leading-6 text-center"
+                            style={{ background: columns[ci].accent, color: columns[ci].color }}
+                          >
+                            {count}
+                          </span>
+                        ) : (
+                          <span className="text-slate-200 font-bold">–</span>
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Resumo: sem responsável */}
+        {(() => {
+          const unassigned = allTasks.filter(t => t.colaborador === "Não atribuído" && t.colId !== "concluido");
+          if (unassigned.length === 0) return null;
+          return (
+            <div className="bg-white rounded-2xl shadow-sm border border-amber-100 p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <AlertCircle size={15} className="text-amber-400" />
+                <h3 className="text-xs font-black uppercase tracking-widest text-amber-500">
+                  {unassigned.length} cards sem responsável
+                </h3>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {unassigned.map(t => (
+                  <span key={t.id} className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 border border-amber-100">
+                    #{t.title} · {t.colTitle}
+                  </span>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
@@ -474,10 +780,11 @@ export default function App() {
   const dismissToast = useCallback(() => setToast(null), []);
 
   const officialColumnsStructure = useMemo(() => [
-    { id: "semservico",  title: "Sem Serviço",  color: "#ef4444", accent: "#fee2e2" },
-    { id: "materiaiscl", title: "Materiais CL", color: "#84cc16", accent: "#f7fee7" },
-    { id: "acaost",      title: "Ação ST",      color: "#3b82f6", accent: "#eff6ff" },
-    { id: "concluido",   title: "Concluído",    color: "#10b981", accent: "#f0fdf4" },
+    { id: "semservico",    title: "Sem Serviço",    color: "#ef4444", accent: "#fee2e2" },
+    { id: "materiaiscl",  title: "Materiais CL",   color: "#84cc16", accent: "#f7fee7" },
+    { id: "acaost",       title: "Ação ST",        color: "#3b82f6", accent: "#eff6ff" },
+    { id: "baixaocupacao", title: "Baixa Ocupação", color: "#f59e0b", accent: "#fffbeb" },
+    { id: "concluido",    title: "Concluído",      color: "#10b981", accent: "#f0fdf4" },
   ], []);
 
   const persistColumnPos = (task: KanbanTask, colId: string) => {
@@ -856,7 +1163,7 @@ export default function App() {
     showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
     persistColumnPos(preparedTask, toColId);
 
-    const apiAction = toColId === "acaost" ? "createActionST" : "updateTask";
+    const apiAction = toColId === "acaost" ? "createActionST" : toColId === "baixaocupacao" ? "createBaixaOcupacao" : "updateTask";
     const cleanTask = { 
       ...preparedTask, 
       id: preparedTask.title,
@@ -991,7 +1298,9 @@ export default function App() {
               <Menu size={18} />
             </button>
             <div>
-              <h1 className="text-base font-black text-[#0f172a]">Quadro Live (Ably)</h1>
+              <h1 className="text-base font-black text-[#0f172a]">
+                {activeNav === "kanban" ? "Quadro Live (Ably)" : activeNav === "colaboradores" ? "Colaboradores" : activeNav === "relatorios" ? "Relatórios" : "Configurações"}
+              </h1>
               <p className="text-xs text-slate-400 font-medium">
                 {totalTasks} cards · {concludedCount} concluídos
               </p>
@@ -1036,7 +1345,17 @@ export default function App() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-x-auto overflow-y-hidden">
+        {activeNav === "colaboradores" && <ColaboradoresView columns={columns} />}
+        {activeNav === "relatorios" && <RelatoriosView columns={columns} />}
+        {activeNav === "configuracoes" && (
+          <div className="flex-1 flex items-center justify-center text-slate-400 text-sm font-semibold">
+            <div className="text-center">
+              <Settings size={32} className="mx-auto mb-2 opacity-30" />
+              <p>Configurações em breve</p>
+            </div>
+          </div>
+        )}
+        <div className="flex-1 overflow-x-auto overflow-y-hidden" style={{ display: activeNav === "kanban" ? "flex" : "none" }}>
           <div className="flex gap-4 h-full p-5 min-w-max">
             {filteredColumns.map(col => (
               <div key={col.id} className="flex flex-col w-72 shrink-0">
