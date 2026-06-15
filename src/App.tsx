@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef, Component } from "react";
 import { Realtime } from "ably";
 import {
   LayoutGrid, Users, BarChart3, Settings, Search, Filter, ChevronDown,
@@ -9,15 +9,52 @@ import {
 
 const API_URL = "https://script.google.com/macros/s/AKfycbzRN6LZWIgtuZ7IXkuc4-zP-vOoFSmeqQPEAYpzuVgdEGQX9eCiLIMAd2jWFZgoy9SdFA/exec";
 
+// ─── ERROR BOUNDARY ───
+class ErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error("Render crash:", error, info.componentStack);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex h-screen items-center justify-center flex-col gap-4" style={{ background: "#0f172a" }}>
+          <div className="w-10 h-10 rounded-2xl flex items-center justify-center" style={{ background: "linear-gradient(135deg, #ef4444, #dc2626)" }}>
+            <span className="text-white font-black text-sm">!</span>
+          </div>
+          <div className="text-center px-6">
+            <p className="text-white font-bold text-sm mb-1">Algo deu errado</p>
+            <p className="text-slate-500 text-xs mb-4 font-mono">{this.state.error?.message}</p>
+            <button
+              onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload(); }}
+              className="px-5 py-2 rounded-xl text-white text-sm font-bold"
+              style={{ background: "#4f46e5" }}
+            >
+              Recarregar
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // ─── CONFIGURAÇÃO DO ABLY ───
 const ABLY_API_KEY = "BUp6Lg.QfvVuw:DBQaijX7rEyBdz4A1dXnrDXE68wWcCWkQTUG_BLSk9E"; 
 const ABLY_CHANNEL_NAME = "kanban-live";
 
 // IMPORTANTE: Mudamos o sufixo das chaves para limpar o lixo do LocalStorage antigo que travava os cards juntos
-const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations_v2"; 
-const LS_COLUMNS_KEY     = "tlp_kanban_columns_v2";     
-const LS_PENDING_KEY     = "tlp_kanban_pending_v2";     
-const LS_DELETED_KEY     = "tlp_kanban_deleted_v2";     
+const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations_v3"; 
+const LS_COLUMNS_KEY     = "tlp_kanban_columns_v3";     
+const LS_PENDING_KEY     = "tlp_kanban_pending_v3";     
+const LS_DELETED_KEY     = "tlp_kanban_deleted_v3";     
 const PENDING_TTL_MS = 3 * 60 * 1000; 
 
 const COLLABORATORS = [
@@ -52,7 +89,10 @@ interface KanbanTask {
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
 function getPersistKey(task: KanbanTask): string {
-  return `task:${task.id}`;
+  // rowkey é a chave única da linha na planilha — usa ela se existir
+  if (task.rowkey) return `task:rk${task.rowkey}`;
+  // fallback: sourceColumn + title para diferenciar cards com mesmo título em abas diferentes
+  return `task:${task.sourceColumn ?? "unknown"}:${task.title}`;
 }
 
 function getCollabMeta(name: string) {
@@ -825,8 +865,22 @@ export default function App() {
   const loadKanban = useCallback(async (silent = false) => {
     try {
       if (!silent) setLoading(true);
-      const response = await fetch(API_URL);
-      const data = await response.json();
+      
+      let data: any = null;
+      try {
+        const response = await fetch(API_URL);
+        const text = await response.text();
+        // Google Sheets às vezes retorna HTML de erro em vez de JSON
+        if (!text.trim().startsWith("{") && !text.trim().startsWith("[")) {
+          throw new Error(`API retornou resposta inválida: ${text.substring(0, 100)}`);
+        }
+        data = JSON.parse(text);
+      } catch (fetchErr) {
+        console.error("Erro ao buscar/parsear API:", fetchErr);
+        // Se tiver dados em cache, mantém o que está na tela
+        if (!silent) setLoading(false);
+        return;
+      }
       
       if (data && typeof data === "object" && !Array.isArray(data)) {
         let savedAnnotations: Record<string, Annotation[]> = {};
@@ -931,9 +985,11 @@ export default function App() {
         setColumns(builtColumns);
       }
     } catch (error) {
-      console.error("Erro ao ler API:", error);
+      console.error("Erro inesperado no loadKanban:", error);
+      // Garante que a tela não fica branca — mantém colunas vazias se não tiver nada
+      setColumns(prev => prev.length > 0 ? prev : officialColumnsStructure.map(col => ({ ...col, tasks: [] })));
     } finally {
-      if (!silent) setLoading(false);
+      setLoading(false);
     }
   }, [officialColumnsStructure]);
 
@@ -1231,6 +1287,7 @@ export default function App() {
   }
 
   return (
+    <ErrorBoundary>
     <div className="flex h-screen overflow-hidden" style={{ background: "#f1f5f9" }}>
       {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
 
@@ -1509,5 +1566,6 @@ export default function App() {
         </div>
       </div>
     </div>
+    </ErrorBoundary>
   );
 }
