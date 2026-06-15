@@ -18,7 +18,6 @@ const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations_v2";
 const LS_COLUMNS_KEY     = "tlp_kanban_columns_v2";     
 const LS_PENDING_KEY     = "tlp_kanban_pending_v2";     
 const LS_DELETED_KEY     = "tlp_kanban_deleted_v2";     
-const LS_ASSIGNEES_KEY   = "tlp_kanban_assignees_v2";
 const PENDING_TTL_MS = 3 * 60 * 1000; 
 
 const COLLABORATORS = [
@@ -34,14 +33,14 @@ type StepStatus = "pendente" | "em andamento" | "concluído";
 type SubtaskStatus = "pendente" | "em andamento" | "concluído";
 
 interface ChecklistItem { id: string; label: string; done: boolean; }
-interface Subtask { id: string; title: string; assignee: string; status: SubtaskStatus; }
+interface Subtask { id: string; title: string; colaborador: string; status: SubtaskStatus; }
 interface Annotation { id: string; text: string; createdAt: string; }
 interface Step { id: string; label: string; status: StepStatus; }
 
 interface KanbanTask {
   id: string; title: string; ionix: string; cluster: string; uf: string;
-  material: string; quantidade: string; description: string; assignee: string; 
-  assigneeInitials: string; assigneeColor: string; priority: Priority; dueDate: string; 
+  material: string; quantidade: string; description: string; colaborador: string; 
+  colaboradorInitials: string; colaboradorColor: string; priority: Priority; dueDate: string; 
   steps: Step[]; tags: string[]; checklist: ChecklistItem[]; subtasks: Subtask[]; 
   annotations: Annotation[]; previousColumnId?: string;
   rowkey?: string; // chave única da linha na planilha
@@ -53,10 +52,7 @@ interface KanbanTask {
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
 function getPersistKey(task: KanbanTask): string {
-  // Usa identificador estável (rowkey ou título) em vez do id composto,
-  // que muda a cada drag/drop e a cada reload. Isso garante que
-  // anotações e colaborador (perfil) não se percam no refresh.
-  return `task:${task.rowkey || task.title}`;
+  return `task:${task.id}`;
 }
 
 function getCollabMeta(name: string) {
@@ -125,7 +121,7 @@ function TaskDetailModal({
   const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes">("info");
   const [newCheckItem, setNewCheckItem] = useState("");
   const [newNote, setNewNote] = useState("");
-  const [newSubtask, setNewSubtask] = useState({ title: "", assignee: "", status: "pendente" as SubtaskStatus });
+  const [newSubtask, setNewSubtask] = useState({ title: "", colaborador: "", status: "pendente" as SubtaskStatus });
   const [showSubtaskForm, setShowSubtaskForm] = useState(false);
 
   const save = (updated: KanbanTask) => {
@@ -135,11 +131,6 @@ function TaskDetailModal({
       const stored = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}");
       stored[getPersistKey(updated)] = updated.annotations;
       localStorage.setItem(LS_ANNOTATIONS_KEY, JSON.stringify(stored));
-    } catch {}
-    try {
-      const storedAssignees = JSON.parse(localStorage.getItem(LS_ASSIGNEES_KEY) || "{}");
-      storedAssignees[getPersistKey(updated)] = updated.assignee;
-      localStorage.setItem(LS_ASSIGNEES_KEY, JSON.stringify(storedAssignees));
     } catch {}
   };
 
@@ -154,7 +145,7 @@ function TaskDetailModal({
   const addSubtask = () => {
     if (!newSubtask.title.trim()) return;
     save({ ...local, subtasks: [...local.subtasks, { id: `sub-${Date.now()}`, ...newSubtask }] });
-    setNewSubtask({ title: "", assignee: "", status: "pendente" });
+    setNewSubtask({ title: "", colaborador: "", status: "pendente" });
     setShowSubtaskForm(false);
   };
   const updateSubtask = (id: string, patch: Partial<Subtask>) => save({ ...local, subtasks: local.subtasks.map(s => s.id === id ? { ...s, ...patch } : s) });
@@ -278,8 +269,8 @@ function TaskDetailModal({
                   <div className="flex-1 min-w-0">
                     <p className="text-[9px] font-black uppercase tracking-widest text-[#94a3b8] mb-1">Colaborador</p>
                     <select
-                      value={local.assignee}
-                      onChange={e => { const m = getCollabMeta(e.target.value); save({ ...local, assignee: e.target.value, assigneeInitials: m.initials, assigneeColor: m.color }); }}
+                      value={local.colaborador}
+                      onChange={e => { const m = getCollabMeta(e.target.value); save({ ...local, colaborador: e.target.value, colaboradorInitials: m.initials, colaboradorColor: m.color }); }}
                       className="w-full text-sm font-bold text-[#0f172a] bg-transparent border-none focus:outline-none cursor-pointer"
                     >
                       <option value="Não atribuído">Não atribuído</option>
@@ -385,7 +376,7 @@ function TaskDetailModal({
                     <div key={sub.id} className="flex items-center gap-3 px-4 py-2.5 rounded-2xl border border-gray-100 group" style={{ background: "#f8fafc" }}>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-bold text-[#0f172a] truncate">{sub.title}</p>
-                        <p className="text-xs text-[#94a3b8]">{sub.assignee || "Sem responsável"}</p>
+                        <p className="text-xs text-[#94a3b8]">{sub.colaborador || "Sem responsável"}</p>
                       </div>
                       <select
                         value={sub.status}
@@ -460,208 +451,10 @@ function TaskDetailModal({
   );
 }
 
-function CollaboratorsView({
-  columns, onOpenTask,
-}: {
-  columns: Column[];
-  onOpenTask: (task: KanbanTask, columnId: string) => void;
-}) {
-  const groups = useMemo(() => {
-    const map = new Map<string, { meta: ReturnType<typeof getCollabMeta>; items: { task: KanbanTask; columnId: string }[] }>();
-
-    // Garante que todos os colaboradores cadastrados apareçam, mesmo sem cards
-    COLLABORATORS.forEach(c => map.set(c.name, { meta: c, items: [] }));
-    map.set("Não atribuído", { meta: getCollabMeta("Não atribuído"), items: [] });
-
-    columns.forEach(col => {
-      col.tasks.forEach(task => {
-        const name = task.assignee || "Não atribuído";
-        if (!map.has(name)) map.set(name, { meta: getCollabMeta(name), items: [] });
-        map.get(name)!.items.push({ task, columnId: col.id });
-      });
-    });
-
-    return Array.from(map.entries()).map(([name, data]) => ({ name, ...data }));
-  }, [columns]);
-
-  const colMeta = useMemo(() => {
-    const m = new Map<string, { title: string; color: string }>();
-    columns.forEach(c => m.set(c.id, { title: c.title, color: c.color }));
-    return m;
-  }, [columns]);
-
-  return (
-    <div className="flex-1 overflow-y-auto p-5">
-      <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}>
-        {groups.map(group => (
-          <div key={group.name} className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden flex flex-col" style={{ maxHeight: 420 }}>
-            <div className="flex items-center gap-3 px-4 py-3.5 shrink-0" style={{ borderBottom: "1px solid #f1f5f9" }}>
-              <div
-                className="w-9 h-9 rounded-full flex items-center justify-center text-white font-black text-xs shrink-0"
-                style={{ background: group.meta.color }}
-              >
-                {group.meta.initials}
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-black text-[#0f172a] truncate">{group.name}</p>
-                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  {group.items.length} {group.items.length === 1 ? "card" : "cards"}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto px-3 py-2.5 space-y-1.5" style={{ scrollbarWidth: "thin" }}>
-              {group.items.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-8 text-slate-300">
-                  <CheckCircle size={18} />
-                  <p className="text-[11px] font-semibold mt-1.5">Sem cards atribuídos</p>
-                </div>
-              ) : (
-                group.items.map(({ task, columnId }) => {
-                  const prio = priorityBadge(task.priority);
-                  const cm = colMeta.get(columnId);
-                  return (
-                    <button
-                      key={task.id}
-                      onClick={() => onOpenTask(task, columnId)}
-                      className="w-full flex items-center gap-2.5 text-left px-3 py-2 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-slate-50 transition-all"
-                    >
-                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: prio.dot }} />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-bold text-[#0f172a] truncate">{task.title}</p>
-                        <p className="text-[10px] text-slate-400 truncate">{task.cluster !== "—" ? task.cluster : task.ionix}</p>
-                      </div>
-                      {cm && (
-                        <span className="shrink-0 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md" style={{ background: cm.color + "1a", color: cm.color }}>
-                          {cm.title}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ReportsView({ columns }: { columns: Column[] }) {
-  const total = columns.reduce((a, c) => a + c.tasks.length, 0);
-
-  const byColumn = useMemo(
-    () => columns.map(c => ({ id: c.id, title: c.title, color: c.color, count: c.tasks.length })),
-    [columns]
-  );
-
-  const byPriority = useMemo(() => {
-    const counts: Record<Priority, number> = { alta: 0, média: 0, baixa: 0 };
-    columns.forEach(c => c.tasks.forEach(t => { counts[t.priority] = (counts[t.priority] ?? 0) + 1; }));
-    return counts;
-  }, [columns]);
-
-  const byCollaborator = useMemo(() => {
-    const counts = new Map<string, number>();
-    columns.forEach(c => c.tasks.forEach(t => {
-      const name = t.assignee || "Não atribuído";
-      counts.set(name, (counts.get(name) ?? 0) + 1);
-    }));
-    return Array.from(counts.entries())
-      .map(([name, count]) => ({ name, count, meta: getCollabMeta(name) }))
-      .sort((a, b) => b.count - a.count);
-  }, [columns]);
-
-  const maxColCount = Math.max(1, ...byColumn.map(c => c.count));
-  const maxCollabCount = Math.max(1, ...byCollaborator.map(c => c.count));
-  const concludedCount = columns.find(c => c.id === "concluido")?.tasks.length ?? 0;
-  const concludedPct = total > 0 ? Math.round((concludedCount / total) * 100) : 0;
-
-  return (
-    <div className="flex-1 overflow-y-auto p-5 space-y-4">
-      <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
-        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Total de cards</p>
-          <p className="text-3xl font-black text-[#0f172a]">{total}</p>
-        </div>
-        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Concluídos</p>
-          <p className="text-3xl font-black text-[#0f172a]">{concludedCount}</p>
-          <p className="text-[11px] font-semibold text-emerald-500 mt-0.5">{concludedPct}% do total</p>
-        </div>
-        {(["alta", "média", "baixa"] as Priority[]).map(p => {
-          const badge = priorityBadge(p);
-          return (
-            <div key={p} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Prioridade {badge.label}</p>
-              <p className="text-3xl font-black" style={{ color: badge.text }}>{byPriority[p] ?? 0}</p>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 1fr" }}>
-        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
-          <p className="text-xs font-black text-[#0f172a] mb-4">Cards por coluna</p>
-          <div className="space-y-3">
-            {byColumn.map(col => (
-              <div key={col.id}>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-bold text-slate-600">{col.title}</span>
-                  <span className="text-xs font-black text-slate-400">{col.count}</span>
-                </div>
-                <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
-                  <div
-                    className="h-full rounded-full transition-all"
-                    style={{ width: `${(col.count / maxColCount) * 100}%`, background: col.color }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
-          <p className="text-xs font-black text-[#0f172a] mb-4">Cards por colaborador</p>
-          {byCollaborator.length === 0 ? (
-            <p className="text-xs text-slate-400">Sem dados ainda.</p>
-          ) : (
-            <div className="space-y-3">
-              {byCollaborator.map(c => (
-                <div key={c.name}>
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <div
-                        className="w-4 h-4 rounded-full flex items-center justify-center text-white font-black text-[7px] shrink-0"
-                        style={{ background: c.meta.color }}
-                      >
-                        {c.meta.initials}
-                      </div>
-                      <span className="text-xs font-bold text-slate-600 truncate">{c.name}</span>
-                    </div>
-                    <span className="text-xs font-black text-slate-400 shrink-0">{c.count}</span>
-                  </div>
-                  <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
-                    <div
-                      className="h-full rounded-full transition-all"
-                      style={{ width: `${(c.count / maxCollabCount) * 100}%`, background: c.meta.color }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function App() {
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filterAssignee, setFilterAssignee] = useState<string>("Todos");
+  const [filterColaborador, setFilterColaborador] = useState<string>("Todos");
   const [searchQuery, setSearchQuery] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeNav, setActiveNav] = useState("kanban");
@@ -684,7 +477,6 @@ export default function App() {
     { id: "semservico",  title: "Sem Serviço",  color: "#ef4444", accent: "#fee2e2" },
     { id: "materiaiscl", title: "Materiais CL", color: "#84cc16", accent: "#f7fee7" },
     { id: "acaost",      title: "Ação ST",      color: "#3b82f6", accent: "#eff6ff" },
-    { id: "baixaocupacao", title: "IDs de Baixa-Ocupação", color: "#0ea5e9", accent: "#e0f2fe" },
     { id: "concluido",   title: "Concluído",    color: "#10b981", accent: "#f0fdf4" },
   ], []);
 
@@ -732,12 +524,10 @@ export default function App() {
       if (data && typeof data === "object" && !Array.isArray(data)) {
         let savedAnnotations: Record<string, Annotation[]> = {};
         let savedColumns: Record<string, string> = {};
-        let savedAssignees: Record<string, string> = {};
         let pending: Record<string, { task: KanbanTask; columnId: string; ts: number }> = {};
         let deleted: Record<string, number> = {};
         try { savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
         try { savedColumns    = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY)     || "{}"); } catch {}
-        try { savedAssignees  = JSON.parse(localStorage.getItem(LS_ASSIGNEES_KEY)   || "{}"); } catch {}
         try { pending         = JSON.parse(localStorage.getItem(LS_PENDING_KEY)     || "{}"); } catch {}
         try { deleted         = JSON.parse(localStorage.getItem(LS_DELETED_KEY)     || "{}"); } catch {}
 
@@ -757,7 +547,7 @@ export default function App() {
             const rowkey = task.rowkey ? String(task.rowkey) : null;
             const uniqueId = rowkey ? `${col.id}-rk${rowkey}` : `${col.id}-${rawId}-${index}`;
 
-            const meta = getCollabMeta(task.assignee || "Não atribuído");
+            const meta = getCollabMeta(task.colaborador || "Não atribuído");
             const builtTask: KanbanTask = {
               id: uniqueId, 
               title: rawId,
@@ -769,9 +559,9 @@ export default function App() {
               material: task.material || task.description?.match(/Material[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
               quantidade: task.quantidade || task.description?.match(/Qtd?[a-z.]*[:\s]+([^\n|]+)/i)?.[1]?.trim() || task.description?.match(/Quantidade[:\s]+([^\n|]+)/i)?.[1]?.trim() || "—",
               description: task.description || "",
-              assignee: task.assignee || "Não atribuído",
-              assigneeInitials: meta.initials,
-              assigneeColor: meta.color,
+              colaborador: task.colaborador || "Não atribuído",
+              colaboradorInitials: meta.initials,
+              colaboradorColor: meta.color,
               priority: "média",
               dueDate: task.dueDate || "",
               steps: [],
@@ -784,12 +574,6 @@ export default function App() {
             };
             const key = getPersistKey(builtTask);
             builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
-            if (savedAssignees[key]) {
-              const savedMeta = getCollabMeta(savedAssignees[key]);
-              builtTask.assignee = savedAssignees[key];
-              builtTask.assigneeInitials = savedMeta.initials;
-              builtTask.assigneeColor = savedMeta.color;
-            }
             allTasksFlat.push({ apiColId: col.id, task: builtTask, key });
           });
         });
@@ -907,15 +691,15 @@ export default function App() {
     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: { ...updated, id: updated.title } }) }).catch(() => {});
   };
 
-  const handleAssigneeChange = async (taskId: string, newAssignee: string) => {
-    const meta = getCollabMeta(newAssignee);
+  const handleColaboradorChange = async (taskId: string, newColaborador: string) => {
+    const meta = getCollabMeta(newColaborador);
     let updatedTask: KanbanTask | null = null;
 
     setColumns(prev => prev.map(col => ({
       ...col,
       tasks: col.tasks.map(t => {
         if (t.id === taskId) {
-          updatedTask = { ...t, assignee: newAssignee, assigneeInitials: meta.initials, assigneeColor: meta.color };
+          updatedTask = { ...t, colaborador: newColaborador, colaboradorInitials: meta.initials, colaboradorColor: meta.color };
           return updatedTask;
         }
         return t;
@@ -924,13 +708,8 @@ export default function App() {
 
     if (updatedTask) {
       ablyChannelRef.current?.publish("taskUpdated", { updatedTask, senderId: myClientIdRef.current });
-      try {
-        const stored = JSON.parse(localStorage.getItem(LS_ASSIGNEES_KEY) || "{}");
-        stored[getPersistKey(updatedTask)] = newAssignee;
-        localStorage.setItem(LS_ASSIGNEES_KEY, JSON.stringify(stored));
-      } catch {}
       const cleanId = (updatedTask as KanbanTask).title;
-      fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId: cleanId, assignee: newAssignee }) }).catch(() => {});
+      fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateColaborador", taskId: cleanId, colaborador: newColaborador }) }).catch(() => {});
     }
   };
 
@@ -1098,7 +877,7 @@ export default function App() {
     columns.map(col => ({
       ...col,
       tasks: Array.isArray(col.tasks) ? col.tasks.filter(t => {
-        const matchesAssignee = filterAssignee === "Todos" || t.assignee === filterAssignee;
+        const matchesColaborador = filterColaborador === "Todos" || t.colaborador === filterColaborador;
         
         const q = searchQuery.trim().toLowerCase();
         const matchesSearch = !q || 
@@ -1107,9 +886,9 @@ export default function App() {
           String(t.cluster).toLowerCase().includes(q) || 
           String(t.description).toLowerCase().includes(q);
 
-        return matchesAssignee && matchesSearch;
+        return matchesColaborador && matchesSearch;
       }) : [],
-    })), [columns, filterAssignee, searchQuery]
+    })), [columns, filterColaborador, searchQuery]
   );
 
   const duplicateTitleSet = useMemo(() => {
@@ -1212,21 +991,13 @@ export default function App() {
               <Menu size={18} />
             </button>
             <div>
-              <h1 className="text-base font-black text-[#0f172a]">
-                {activeNav === "kanban" && "Quadro Live (Ably)"}
-                {activeNav === "colaboradores" && "Colaboradores"}
-                {activeNav === "relatorios" && "Relatórios"}
-                {activeNav === "configuracoes" && "Configurações"}
-              </h1>
+              <h1 className="text-base font-black text-[#0f172a]">Quadro Live (Ably)</h1>
               <p className="text-xs text-slate-400 font-medium">
-                {activeNav === "kanban" && `${totalTasks} cards · ${concludedCount} concluídos`}
-                {activeNav === "colaboradores" && "Distribuição de cards por colaborador"}
-                {activeNav === "relatorios" && "Visão geral por coluna e status"}
+                {totalTasks} cards · {concludedCount} concluídos
               </p>
             </div>
           </div>
 
-          {activeNav === "kanban" && (
           <div className="flex items-center gap-3">
             <div className="relative">
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -1244,7 +1015,7 @@ export default function App() {
                 className="flex items-center gap-2 px-3 py-2 text-sm font-semibold border border-slate-200 rounded-xl bg-slate-50 text-slate-600 hover:border-indigo-300 transition-colors"
               >
                 <Filter size={13} />
-                <span>{filterAssignee}</span>
+                <span>{filterColaborador}</span>
                 <ChevronDown size={12} />
               </button>
               {filterOpen && (
@@ -1252,9 +1023,9 @@ export default function App() {
                   {["Todos", ...COLLABORATORS.map(c => c.name)].map(name => (
                     <button
                       key={name}
-                      onClick={() => { setFilterAssignee(name); setFilterOpen(false); }}
+                      onClick={() => { setFilterColaborador(name); setFilterOpen(false); }}
                       className="w-full text-left px-4 py-2 text-sm font-medium hover:bg-slate-50 transition-colors"
-                      style={{ color: filterAssignee === name ? "#4f46e5" : "#334155" }}
+                      style={{ color: filterColaborador === name ? "#4f46e5" : "#334155" }}
                     >
                       {name}
                     </button>
@@ -1263,10 +1034,8 @@ export default function App() {
               )}
             </div>
           </div>
-          )}
         </header>
 
-        {activeNav === "kanban" && (
         <div className="flex-1 overflow-x-auto overflow-y-hidden">
           <div className="flex gap-4 h-full p-5 min-w-max">
             {filteredColumns.map(col => (
@@ -1299,7 +1068,7 @@ export default function App() {
                   )}
                   {col.tasks.map(task => {
                     const prio = priorityBadge(task.priority);
-                    const meta = getCollabMeta(task.assignee);
+                    const meta = getCollabMeta(task.colaborador);
                     const isDuplicate = duplicateTitleSet.has(task.title);
                     return (
                       <div
@@ -1366,13 +1135,13 @@ export default function App() {
                                 <div
                                   className="w-6 h-6 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0 ring-2 ring-white"
                                   style={{ background: meta.color }}
-                                  title={task.assignee}
+                                  title={task.colaborador === "Não atribuído" ? "Sem perfil" : task.colaborador }
                                 >
                                   {meta.initials}
                                 </div>
                                 <select
-                                  value={task.assignee}
-                                  onChange={e => handleAssigneeChange(task.id, e.target.value)}
+                                  value={task.colaborador}
+                                  onChange={e => handleColaboradorChange(task.id, e.target.value)}
                                   className="text-[10px] font-semibold border-none bg-transparent text-slate-500 cursor-pointer focus:outline-none max-w-[90px]"
                                 >
                                   <option value="Não atribuído">Sem perfil</option>
@@ -1419,24 +1188,6 @@ export default function App() {
             ))}
           </div>
         </div>
-        )}
-
-        {activeNav === "colaboradores" && (
-          <CollaboratorsView columns={columns} onOpenTask={(task, columnId) => setOpenTask({ task, columnId })} />
-        )}
-
-        {activeNav === "relatorios" && (
-          <ReportsView columns={columns} />
-        )}
-
-        {activeNav === "configuracoes" && (
-          <div className="flex-1 flex items-center justify-center text-slate-400">
-            <div className="text-center">
-              <Settings size={28} className="mx-auto mb-2 opacity-40" />
-              <p className="text-sm font-semibold">Nenhuma configuração disponível ainda.</p>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
