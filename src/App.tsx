@@ -14,10 +14,12 @@ const ABLY_API_KEY = "BUp6Lg.QfvVuw:DBQaijX7rEyBdz4A1dXnrDXE68wWcCWkQTUG_BLSk9E"
 const ABLY_CHANNEL_NAME = "kanban-live";
 
 // IMPORTANTE: Mudamos o sufixo das chaves para limpar o lixo do LocalStorage antigo que travava os cards juntos
-const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations_v2"; 
-const LS_COLUMNS_KEY     = "tlp_kanban_columns_v2";     
-const LS_PENDING_KEY     = "tlp_kanban_pending_v2";     
-const LS_DELETED_KEY     = "tlp_kanban_deleted_v2";     
+const LS_ANNOTATIONS_KEY  = "tlp_kanban_annotations_v2"; 
+const LS_COLUMNS_KEY      = "tlp_kanban_columns_v2";     
+const LS_PENDING_KEY      = "tlp_kanban_pending_v2";     
+const LS_DELETED_KEY      = "tlp_kanban_deleted_v2";     
+// Persiste overrides locais (assignee, checklist, subtasks) que não vêm da planilha
+const LS_TASK_OVERRIDES_KEY = "tlp_kanban_overrides_v1";
 const PENDING_TTL_MS = 3 * 60 * 1000; 
 
 const COLLABORATORS = [
@@ -515,6 +517,15 @@ export default function App() {
     } catch {}
   };
 
+  const persistTaskOverride = (task: KanbanTask, patch: Partial<Pick<KanbanTask, "assignee" | "checklist" | "subtasks">>) => {
+    const key = getPersistKey(task);
+    try {
+      const overrides = JSON.parse(localStorage.getItem(LS_TASK_OVERRIDES_KEY) || "{}");
+      overrides[key] = { ...(overrides[key] || {}), ...patch };
+      localStorage.setItem(LS_TASK_OVERRIDES_KEY, JSON.stringify(overrides));
+    } catch {}
+  };
+
   const loadKanban = useCallback(async (silent = false) => {
     try {
       if (!silent) setLoading(true);
@@ -526,10 +537,12 @@ export default function App() {
         let savedColumns: Record<string, string> = {};
         let pending: Record<string, { task: KanbanTask; columnId: string; ts: number }> = {};
         let deleted: Record<string, number> = {};
+        let taskOverrides: Record<string, Partial<KanbanTask>> = {};
         try { savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
         try { savedColumns    = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY)     || "{}"); } catch {}
         try { pending         = JSON.parse(localStorage.getItem(LS_PENDING_KEY)     || "{}"); } catch {}
         try { deleted         = JSON.parse(localStorage.getItem(LS_DELETED_KEY)     || "{}"); } catch {}
+        try { taskOverrides   = JSON.parse(localStorage.getItem(LS_TASK_OVERRIDES_KEY) || "{}"); } catch {}
 
         const now = Date.now();
         const allTasksFlat: { task: KanbanTask; apiColId: string; key: string }[] = [];
@@ -574,6 +587,18 @@ export default function App() {
             };
             const key = getPersistKey(builtTask);
             builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
+            // Aplica overrides locais (assignee, checklist, subtasks) salvos no refresh
+            if (taskOverrides[key]) {
+              const ov = taskOverrides[key];
+              if (ov.assignee !== undefined) {
+                const ovMeta = getCollabMeta(ov.assignee);
+                builtTask.assignee = ov.assignee;
+                builtTask.assigneeInitials = ovMeta.initials;
+                builtTask.assigneeColor = ovMeta.color;
+              }
+              if (ov.checklist !== undefined) builtTask.checklist = ov.checklist;
+              if (ov.subtasks !== undefined)  builtTask.subtasks  = ov.subtasks;
+            }
             allTasksFlat.push({ apiColId: col.id, task: builtTask, key });
           });
         });
@@ -685,6 +710,7 @@ export default function App() {
 
   const updateTask = (updated: KanbanTask) => {
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
+    persistTaskOverride(updated, { assignee: updated.assignee, checklist: updated.checklist, subtasks: updated.subtasks });
     ablyChannelRef.current?.publish("taskUpdated", { updatedTask: updated, senderId: myClientIdRef.current });
     
     // Sempre limpamos o ID composto enviando apenas o ID limpo (title) para o Sheets
@@ -708,6 +734,7 @@ export default function App() {
 
     if (updatedTask) {
       ablyChannelRef.current?.publish("taskUpdated", { updatedTask, senderId: myClientIdRef.current });
+      persistTaskOverride(updatedTask as KanbanTask, { assignee: newAssignee });
       const cleanId = (updatedTask as KanbanTask).title;
       fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId: cleanId, assignee: newAssignee }) }).catch(() => {});
     }
