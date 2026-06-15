@@ -18,6 +18,7 @@ const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations_v2";
 const LS_COLUMNS_KEY     = "tlp_kanban_columns_v2";     
 const LS_PENDING_KEY     = "tlp_kanban_pending_v2";     
 const LS_DELETED_KEY     = "tlp_kanban_deleted_v2";     
+const LS_ASSIGNEES_KEY   = "tlp_kanban_assignees_v2";
 const PENDING_TTL_MS = 3 * 60 * 1000; 
 
 const COLLABORATORS = [
@@ -52,7 +53,10 @@ interface KanbanTask {
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
 function getPersistKey(task: KanbanTask): string {
-  return `task:${task.id}`;
+  // Usa identificador estável (rowkey ou título) em vez do id composto,
+  // que muda a cada drag/drop e a cada reload. Isso garante que
+  // anotações e colaborador (perfil) não se percam no refresh.
+  return `task:${task.rowkey || task.title}`;
 }
 
 function getCollabMeta(name: string) {
@@ -131,6 +135,11 @@ function TaskDetailModal({
       const stored = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}");
       stored[getPersistKey(updated)] = updated.annotations;
       localStorage.setItem(LS_ANNOTATIONS_KEY, JSON.stringify(stored));
+    } catch {}
+    try {
+      const storedAssignees = JSON.parse(localStorage.getItem(LS_ASSIGNEES_KEY) || "{}");
+      storedAssignees[getPersistKey(updated)] = updated.assignee;
+      localStorage.setItem(LS_ASSIGNEES_KEY, JSON.stringify(storedAssignees));
     } catch {}
   };
 
@@ -451,6 +460,204 @@ function TaskDetailModal({
   );
 }
 
+function CollaboratorsView({
+  columns, onOpenTask,
+}: {
+  columns: Column[];
+  onOpenTask: (task: KanbanTask, columnId: string) => void;
+}) {
+  const groups = useMemo(() => {
+    const map = new Map<string, { meta: ReturnType<typeof getCollabMeta>; items: { task: KanbanTask; columnId: string }[] }>();
+
+    // Garante que todos os colaboradores cadastrados apareçam, mesmo sem cards
+    COLLABORATORS.forEach(c => map.set(c.name, { meta: c, items: [] }));
+    map.set("Não atribuído", { meta: getCollabMeta("Não atribuído"), items: [] });
+
+    columns.forEach(col => {
+      col.tasks.forEach(task => {
+        const name = task.assignee || "Não atribuído";
+        if (!map.has(name)) map.set(name, { meta: getCollabMeta(name), items: [] });
+        map.get(name)!.items.push({ task, columnId: col.id });
+      });
+    });
+
+    return Array.from(map.entries()).map(([name, data]) => ({ name, ...data }));
+  }, [columns]);
+
+  const colMeta = useMemo(() => {
+    const m = new Map<string, { title: string; color: string }>();
+    columns.forEach(c => m.set(c.id, { title: c.title, color: c.color }));
+    return m;
+  }, [columns]);
+
+  return (
+    <div className="flex-1 overflow-y-auto p-5">
+      <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}>
+        {groups.map(group => (
+          <div key={group.name} className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden flex flex-col" style={{ maxHeight: 420 }}>
+            <div className="flex items-center gap-3 px-4 py-3.5 shrink-0" style={{ borderBottom: "1px solid #f1f5f9" }}>
+              <div
+                className="w-9 h-9 rounded-full flex items-center justify-center text-white font-black text-xs shrink-0"
+                style={{ background: group.meta.color }}
+              >
+                {group.meta.initials}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-black text-[#0f172a] truncate">{group.name}</p>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  {group.items.length} {group.items.length === 1 ? "card" : "cards"}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-3 py-2.5 space-y-1.5" style={{ scrollbarWidth: "thin" }}>
+              {group.items.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-8 text-slate-300">
+                  <CheckCircle size={18} />
+                  <p className="text-[11px] font-semibold mt-1.5">Sem cards atribuídos</p>
+                </div>
+              ) : (
+                group.items.map(({ task, columnId }) => {
+                  const prio = priorityBadge(task.priority);
+                  const cm = colMeta.get(columnId);
+                  return (
+                    <button
+                      key={task.id}
+                      onClick={() => onOpenTask(task, columnId)}
+                      className="w-full flex items-center gap-2.5 text-left px-3 py-2 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-slate-50 transition-all"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: prio.dot }} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold text-[#0f172a] truncate">{task.title}</p>
+                        <p className="text-[10px] text-slate-400 truncate">{task.cluster !== "—" ? task.cluster : task.ionix}</p>
+                      </div>
+                      {cm && (
+                        <span className="shrink-0 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md" style={{ background: cm.color + "1a", color: cm.color }}>
+                          {cm.title}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ReportsView({ columns }: { columns: Column[] }) {
+  const total = columns.reduce((a, c) => a + c.tasks.length, 0);
+
+  const byColumn = useMemo(
+    () => columns.map(c => ({ id: c.id, title: c.title, color: c.color, count: c.tasks.length })),
+    [columns]
+  );
+
+  const byPriority = useMemo(() => {
+    const counts: Record<Priority, number> = { alta: 0, média: 0, baixa: 0 };
+    columns.forEach(c => c.tasks.forEach(t => { counts[t.priority] = (counts[t.priority] ?? 0) + 1; }));
+    return counts;
+  }, [columns]);
+
+  const byCollaborator = useMemo(() => {
+    const counts = new Map<string, number>();
+    columns.forEach(c => c.tasks.forEach(t => {
+      const name = t.assignee || "Não atribuído";
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }));
+    return Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count, meta: getCollabMeta(name) }))
+      .sort((a, b) => b.count - a.count);
+  }, [columns]);
+
+  const maxColCount = Math.max(1, ...byColumn.map(c => c.count));
+  const maxCollabCount = Math.max(1, ...byCollaborator.map(c => c.count));
+  const concludedCount = columns.find(c => c.id === "concluido")?.tasks.length ?? 0;
+  const concludedPct = total > 0 ? Math.round((concludedCount / total) * 100) : 0;
+
+  return (
+    <div className="flex-1 overflow-y-auto p-5 space-y-4">
+      <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Total de cards</p>
+          <p className="text-3xl font-black text-[#0f172a]">{total}</p>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Concluídos</p>
+          <p className="text-3xl font-black text-[#0f172a]">{concludedCount}</p>
+          <p className="text-[11px] font-semibold text-emerald-500 mt-0.5">{concludedPct}% do total</p>
+        </div>
+        {(["alta", "média", "baixa"] as Priority[]).map(p => {
+          const badge = priorityBadge(p);
+          return (
+            <div key={p} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Prioridade {badge.label}</p>
+              <p className="text-3xl font-black" style={{ color: badge.text }}>{byPriority[p] ?? 0}</p>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+          <p className="text-xs font-black text-[#0f172a] mb-4">Cards por coluna</p>
+          <div className="space-y-3">
+            {byColumn.map(col => (
+              <div key={col.id}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-slate-600">{col.title}</span>
+                  <span className="text-xs font-black text-slate-400">{col.count}</span>
+                </div>
+                <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{ width: `${(col.count / maxColCount) * 100}%`, background: col.color }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+          <p className="text-xs font-black text-[#0f172a] mb-4">Cards por colaborador</p>
+          {byCollaborator.length === 0 ? (
+            <p className="text-xs text-slate-400">Sem dados ainda.</p>
+          ) : (
+            <div className="space-y-3">
+              {byCollaborator.map(c => (
+                <div key={c.name}>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <div
+                        className="w-4 h-4 rounded-full flex items-center justify-center text-white font-black text-[7px] shrink-0"
+                        style={{ background: c.meta.color }}
+                      >
+                        {c.meta.initials}
+                      </div>
+                      <span className="text-xs font-bold text-slate-600 truncate">{c.name}</span>
+                    </div>
+                    <span className="text-xs font-black text-slate-400 shrink-0">{c.count}</span>
+                  </div>
+                  <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{ width: `${(c.count / maxCollabCount) * 100}%`, background: c.meta.color }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
@@ -477,6 +684,7 @@ export default function App() {
     { id: "semservico",  title: "Sem Serviço",  color: "#ef4444", accent: "#fee2e2" },
     { id: "materiaiscl", title: "Materiais CL", color: "#84cc16", accent: "#f7fee7" },
     { id: "acaost",      title: "Ação ST",      color: "#3b82f6", accent: "#eff6ff" },
+    { id: "baixaocupacao", title: "IDs de Baixa-Ocupação", color: "#0ea5e9", accent: "#e0f2fe" },
     { id: "concluido",   title: "Concluído",    color: "#10b981", accent: "#f0fdf4" },
   ], []);
 
@@ -524,10 +732,12 @@ export default function App() {
       if (data && typeof data === "object" && !Array.isArray(data)) {
         let savedAnnotations: Record<string, Annotation[]> = {};
         let savedColumns: Record<string, string> = {};
+        let savedAssignees: Record<string, string> = {};
         let pending: Record<string, { task: KanbanTask; columnId: string; ts: number }> = {};
         let deleted: Record<string, number> = {};
         try { savedAnnotations = JSON.parse(localStorage.getItem(LS_ANNOTATIONS_KEY) || "{}"); } catch {}
         try { savedColumns    = JSON.parse(localStorage.getItem(LS_COLUMNS_KEY)     || "{}"); } catch {}
+        try { savedAssignees  = JSON.parse(localStorage.getItem(LS_ASSIGNEES_KEY)   || "{}"); } catch {}
         try { pending         = JSON.parse(localStorage.getItem(LS_PENDING_KEY)     || "{}"); } catch {}
         try { deleted         = JSON.parse(localStorage.getItem(LS_DELETED_KEY)     || "{}"); } catch {}
 
@@ -574,6 +784,12 @@ export default function App() {
             };
             const key = getPersistKey(builtTask);
             builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
+            if (savedAssignees[key]) {
+              const savedMeta = getCollabMeta(savedAssignees[key]);
+              builtTask.assignee = savedAssignees[key];
+              builtTask.assigneeInitials = savedMeta.initials;
+              builtTask.assigneeColor = savedMeta.color;
+            }
             allTasksFlat.push({ apiColId: col.id, task: builtTask, key });
           });
         });
@@ -708,6 +924,11 @@ export default function App() {
 
     if (updatedTask) {
       ablyChannelRef.current?.publish("taskUpdated", { updatedTask, senderId: myClientIdRef.current });
+      try {
+        const stored = JSON.parse(localStorage.getItem(LS_ASSIGNEES_KEY) || "{}");
+        stored[getPersistKey(updatedTask)] = newAssignee;
+        localStorage.setItem(LS_ASSIGNEES_KEY, JSON.stringify(stored));
+      } catch {}
       const cleanId = (updatedTask as KanbanTask).title;
       fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateAssignee", taskId: cleanId, assignee: newAssignee }) }).catch(() => {});
     }
@@ -991,13 +1212,21 @@ export default function App() {
               <Menu size={18} />
             </button>
             <div>
-              <h1 className="text-base font-black text-[#0f172a]">Quadro Live (Ably)</h1>
+              <h1 className="text-base font-black text-[#0f172a]">
+                {activeNav === "kanban" && "Quadro Live (Ably)"}
+                {activeNav === "colaboradores" && "Colaboradores"}
+                {activeNav === "relatorios" && "Relatórios"}
+                {activeNav === "configuracoes" && "Configurações"}
+              </h1>
               <p className="text-xs text-slate-400 font-medium">
-                {totalTasks} cards · {concludedCount} concluídos
+                {activeNav === "kanban" && `${totalTasks} cards · ${concludedCount} concluídos`}
+                {activeNav === "colaboradores" && "Distribuição de cards por colaborador"}
+                {activeNav === "relatorios" && "Visão geral por coluna e status"}
               </p>
             </div>
           </div>
 
+          {activeNav === "kanban" && (
           <div className="flex items-center gap-3">
             <div className="relative">
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -1034,8 +1263,10 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
         </header>
 
+        {activeNav === "kanban" && (
         <div className="flex-1 overflow-x-auto overflow-y-hidden">
           <div className="flex gap-4 h-full p-5 min-w-max">
             {filteredColumns.map(col => (
@@ -1188,6 +1419,24 @@ export default function App() {
             ))}
           </div>
         </div>
+        )}
+
+        {activeNav === "colaboradores" && (
+          <CollaboratorsView columns={columns} onOpenTask={(task, columnId) => setOpenTask({ task, columnId })} />
+        )}
+
+        {activeNav === "relatorios" && (
+          <ReportsView columns={columns} />
+        )}
+
+        {activeNav === "configuracoes" && (
+          <div className="flex-1 flex items-center justify-center text-slate-400">
+            <div className="text-center">
+              <Settings size={28} className="mx-auto mb-2 opacity-40" />
+              <p className="text-sm font-semibold">Nenhuma configuração disponível ainda.</p>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
