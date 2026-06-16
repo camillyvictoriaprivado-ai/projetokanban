@@ -153,13 +153,19 @@ interface ConsumoItem {
   quantidade: number;
 }
 
+interface ConsumoItem {
+  codigo: string;
+  quantidade: number;
+}
+
 function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: KanbanTask, onConsumoRegistrado: () => void }) {
   const [itens, setItens] = useState<ConsumoItem[]>([{ codigo: task.codigoMaterial || "", quantidade: 1 }]);
   const [observacoes, setObservacoes] = useState("");
   const [enviando, setEnviando] = useState(false);
-  const [listaEstoque, setListaEstoque] = useState<{ codigo: string; material: string }[]>([]);
+  
+  // Alterado: Agora salva saldo e cluster também
+  const [listaEstoque, setListaEstoque] = useState<{ codigo: string; material: string; saldo: number; cluster: string }[]>([]);
 
-  // Carrega os dados de estoque assim que o modal abre para alimentar o autocomplete
   useEffect(() => {
     fetch(API_URL)
       .then(r => r.text())
@@ -172,6 +178,8 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
             setListaEstoque(raw.map((r: any) => ({
               codigo:   String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? ""),
               material: String(r.material ?? r.Material ?? r.MATERIAL ?? ""),
+              saldo:    Number(r.saldo    ?? r.Saldo    ?? r.SALDO    ?? 0),
+              cluster:  String(r.cluster  ?? r.Cluster  ?? r.CLUSTER  ?? "—"),
             })));
           }
         }
@@ -179,14 +187,8 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
       .catch(err => console.error("Erro ao puxar lista de autocomplete:", err));
   }, []);
 
-  const handleAdicionarMaterial = () => {
-    setItens([...itens, { codigo: "", quantidade: 1 }]);
-  };
-
-  const handleRemoverMaterial = (index: number) => {
-    setItens(itens.filter((_, i) => i !== index));
-  };
-
+  const handleAdicionarMaterial = () => setItens([...itens, { codigo: "", quantidade: 1 }]);
+  const handleRemoverMaterial = (index: number) => setItens(itens.filter((_, i) => i !== index));
   const handleItemChange = (index: number, campo: keyof ConsumoItem, valor: any) => {
     const novosItens = [...itens];
     novosItens[index] = { ...novosItens[index], [campo]: valor };
@@ -194,14 +196,8 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
   };
 
   const handleEnviarConsumo = async () => {
-    if (itens.some(i => !i.codigo.trim())) {
-      alert("Por favor, preencha o código de todos os materiais.");
-      return;
-    }
-    if (itens.some(i => i.quantidade <= 0)) {
-      alert("A quantidade de todos os materiais deve ser maior que zero.");
-      return;
-    }
+    if (itens.some(i => !i.codigo.trim())) { alert("Por favor, preencha o código de todos os materiais."); return; }
+    if (itens.some(i => i.quantidade <= 0)) { alert("A quantidade de todos os materiais deve ser maior que zero."); return; }
 
     setEnviando(true);
     try {
@@ -212,7 +208,7 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
           id_tarefa: task.title,           
           cluster: task.cluster || "—",
           observacoes: observacoes.trim(),
-          itens: itens // Envia o lote de materiais completo em formato JSON array
+          itens: itens // Enviando o array de itens corretamente
         }),
       });
 
@@ -221,13 +217,12 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
       try { resData = JSON.parse(text); } catch { throw new Error("Resposta do servidor inválida."); }
 
       if (resData.status === "success") {
-        alert("Consumo registrado com sucesso! O estoque de todos os itens informados foi recalculado.");
+        alert("Consumo registrado com sucesso! O estoque de todos os itens foi recalculado.");
         onConsumoRegistrado();
       } else {
         alert("Erro no backend: " + (resData.message || "Falha desconhecida"));
       }
     } catch (error: any) {
-      console.error("❌ Erro ao enviar consumo:", error);
       alert("Falha ao salvar no banco de dados: " + error.message);
     } finally {
       setEnviando(false);
@@ -239,26 +234,18 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
       <div className="rounded-2xl p-4 border border-indigo-100 bg-indigo-50/50">
         <h3 className="text-sm font-black text-indigo-900 mb-1">Registrar Uso na Tarefa</h3>
         <p className="text-xs text-indigo-600">
-          Você pode dar baixa em <strong>múltiplos materiais</strong> de uma vez. O sistema enviará os registros individuais para o banco e dará baixa proporcional no estoque.
+          Você pode dar baixa em múltiplos materiais. O sistema recalculará o estoque de cada item listado abaixo.
         </p>
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">ID da Tarefa Vinculada</label>
-          <input type="text" disabled value={task.title} className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-100 font-bold text-slate-500 cursor-not-allowed" />
-        </div>
-        <div>
-          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Cluster</label>
-          <input type="text" disabled value={task.cluster || "—"} className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-100 font-bold text-slate-500 cursor-not-allowed" />
-        </div>
-      </div>
-
+      
       <div className="space-y-3">
         <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block">Lista de Materiais</label>
         
         {itens.map((item, index) => {
-          // Busca o nome do material correspondente no autocomplete para exibir um preview
-          const correspondente = listaEstoque.find(e => e.codigo.toLowerCase() === item.codigo.trim().toLowerCase());
+          // Busca todos os itens correspondentes ao código digitado
+          const correspondentes = listaEstoque.filter(e => e.codigo.toLowerCase() === item.codigo.trim().toLowerCase());
+          // Tenta pegar o do mesmo cluster da tarefa. Se não achar, pega o primeiro que vier.
+          const correspondente = correspondentes.find(c => c.cluster.toLowerCase() === (task.cluster || "").toLowerCase()) || correspondentes[0];
           
           return (
             <div key={index} className="p-3 border border-slate-100 bg-slate-50/50 rounded-xl space-y-1">
@@ -269,8 +256,8 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
                     list="lista-autocomplete-materiais"
                     value={item.codigo} 
                     onChange={(e) => handleItemChange(index, "codigo", e.target.value)} 
-                    placeholder="Código do Material (Ex: M-01)" 
-                    className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-white font-bold text-[#0f172a] focus:outline-none focus:border-indigo-500" 
+                    placeholder="Código (Ex: M-01)" 
+                    className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-white font-bold text-[#0f172a] focus:outline-none focus:border-indigo-500 uppercase" 
                   />
                 </div>
                 <div className="w-24">
@@ -284,43 +271,40 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
                   />
                 </div>
                 {itens.length > 1 && (
-                  <button 
-                    type="button" 
-                    onClick={() => handleRemoverMaterial(index)}
-                    className="p-2.5 text-rose-500 hover:bg-rose-100 rounded-xl transition-colors border border-transparent"
-                  >
+                  <button type="button" onClick={() => handleRemoverMaterial(index)} className="p-2.5 text-rose-500 hover:bg-rose-100 rounded-xl transition-colors border border-transparent">
                     <Trash2 size={16} />
                   </button>
                 )}
               </div>
+
+              {/* Novo Visor de Saldo e Cluster */}
               {correspondente && (
-                <div className="text-[11px] font-bold text-indigo-600 px-1">
-                  📦 Item: {correspondente.material}
+                <div className="flex items-center gap-2 text-[10px] font-bold px-1 pt-1">
+                  <span className="text-indigo-600 truncate max-w-[200px]">📦 {correspondente.material}</span>
+                  <span className="text-slate-400 border-l border-slate-300 pl-2 shrink-0">Cluster: {correspondente.cluster}</span>
+                  <span className={`border-l border-slate-300 pl-2 shrink-0 ${correspondente.saldo > 0 ? "text-emerald-600" : "text-rose-500"}`}>
+                    Saldo em Estoque: {correspondente.saldo}
+                  </span>
                 </div>
               )}
             </div>
           );
         })}
 
-        {/* Componente Datalist HTML5 para Autocomplete nativo rápido */}
         <datalist id="lista-autocomplete-materiais">
           {listaEstoque.map((est, i) => (
-            <option key={i} value={est.codigo}>{est.material}</option>
+            <option key={i} value={est.codigo}>{est.material} ({est.cluster})</option>
           ))}
         </datalist>
 
-        <button
-          type="button"
-          onClick={handleAdicionarMaterial}
-          className="flex items-center gap-1 text-xs font-black text-indigo-500 border border-dashed border-indigo-200 hover:bg-indigo-50 px-3 py-2 rounded-xl transition-colors"
-        >
+        <button type="button" onClick={handleAdicionarMaterial} className="flex items-center gap-1 text-xs font-black text-indigo-500 border border-dashed border-indigo-200 hover:bg-indigo-50 px-3 py-2 rounded-xl transition-colors">
           <Plus size={14} /> Adicionar mais um item
         </button>
       </div>
 
       <div>
         <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Observações adicionais</label>
-        <textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} placeholder="Alguma nota sobre a aplicação deste material..." rows={3} className="w-full text-sm px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-indigo-500 resize-none" />
+        <textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} placeholder="Opcional..." rows={2} className="w-full text-sm px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-indigo-500 resize-none" />
       </div>
       <button onClick={handleEnviarConsumo} disabled={enviando} className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl text-white transition-all shadow-md hover:opacity-90 disabled:bg-slate-300 disabled:cursor-not-allowed" style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}>
         {enviando ? <><RefreshCw size={14} className="animate-spin" /> Registrando no Servidor...</> : "Confirmar e Dar Baixa no Estoque"}
