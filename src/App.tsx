@@ -348,13 +348,14 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
 }
 
 function TaskDetailModal({
-  task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn,
+  task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn, onMaterialRegistrado,
 }: {
   task: KanbanTask; columnId: string; onClose: () => void;
   onUpdate: (u: KanbanTask) => void;
   onComplete: (colId: string, taskId: string) => void;
   onRemove: (colId: string, taskId: string) => void;
   onReturn: (colId: string, taskId: string) => void;
+  onMaterialRegistrado: () => void;
 }) {
   const [local, setLocal] = useState<KanbanTask>({ ...task });
   const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes" | "consumo">("info");
@@ -692,7 +693,7 @@ function TaskDetailModal({
               task={local} 
               onConsumoRegistrado={() => {
                 onClose();
-                window.location.reload(); 
+                onMaterialRegistrado();
               }}
             />
           )}
@@ -2009,6 +2010,10 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
           onComplete={(colId, taskId) => { handleCompleteTask(colId, taskId); setOpenTask(null); }}
           onRemove={handleRemoveFromCompleted}
           onReturn={(colId, taskId) => { handleReturnTask(colId, taskId); setOpenTask(null); }}
+          onMaterialRegistrado={() => {
+            showToast("Consumo registrado! Atualizando estoque...", "success");
+            loadKanban(true);
+          }}
         />
       )}
 
