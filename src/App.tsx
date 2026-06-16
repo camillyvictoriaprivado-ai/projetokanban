@@ -4,7 +4,7 @@ import {
   LayoutGrid, Users, BarChart3, Settings, Search, Filter, ChevronDown,
   Menu, CheckCircle, X, Plus, Trash2, ChevronRight, Calendar, User,
   Tag, FileText, ClipboardList, MessageSquare, Circle, CheckCircle2,
-  RefreshCw, AlertCircle, Zap, Package
+  RefreshCw, AlertCircle, Zap, Package, Mail, Lock, ShieldCheck, LogOut
 } from "lucide-react";
 
 const API_URL = "https://script.google.com/macros/s/AKfycbzRN6LZWIgtuZ7IXkuc4-zP-vOoFSmeqQPEAYpzuVgdEGQX9eCiLIMAd2jWFZgoy9SdFA/exec";
@@ -55,6 +55,7 @@ const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations_v3";
 const LS_COLUMNS_KEY     = "tlp_kanban_columns_v3";     
 const LS_PENDING_KEY     = "tlp_kanban_pending_v3";     
 const LS_DELETED_KEY     = "tlp_kanban_deleted_v3";     
+const LS_SESSION_KEY     = "tlp_kanban_session_v1";      // sessão de login (email + token)
 const PENDING_TTL_MS = 3 * 60 * 1000; 
 
 const COLLABORATORS = [
@@ -1014,7 +1015,7 @@ function RelatoriosView({ columns }: { columns: Column[] }) {
   );
 }
 
-export default function App() {
+function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLogout: () => void }) {
   const [columns, setColumns] = useState<Column[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterColaborador, setFilterColaborador] = useState<string>("Todos");
@@ -1144,14 +1145,19 @@ export default function App() {
               dueDate: task.dueDate || "",
               steps: [],
               tags: Array.isArray(task.tags) ? task.tags : [],
-              checklist: [],
-              subtasks: [],
-              annotations: [],
+              checklist: Array.isArray(task.checklist) ? task.checklist : [],
+              subtasks: Array.isArray(task.subtasks) ? task.subtasks : [],
+              annotations: Array.isArray(task.annotations) ? task.annotations : [],
               codigoMaterial: task.codigo_material !== undefined && task.codigo_material !== null ? String(task.codigo_material) : undefined,
               saldoEstoque: task.saldo_estoque !== undefined && task.saldo_estoque !== null ? task.saldo_estoque : undefined,
             };
             const key = getPersistKey(builtTask);
-            builtTask.annotations = (savedAnnotations[key]?.length ? savedAnnotations[key] : (Array.isArray(task.annotations) ? task.annotations : []));
+            // A planilha agora é a fonte de verdade (compartilhada entre todos os colaboradores).
+            // O cache local só entra como reforço se a planilha ainda não tiver nada salvo
+            // (ex.: alteração feita há poucos segundos, antes do POST terminar).
+            if (!builtTask.annotations.length && savedAnnotations[key]?.length) {
+              builtTask.annotations = savedAnnotations[key];
+            }
             allTasksFlat.push({ apiColId: col.id, task: builtTask, key });
           });
         });
@@ -1267,8 +1273,18 @@ export default function App() {
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
     ablyChannelRef.current?.publish("taskUpdated", { updatedTask: updated, senderId: myClientIdRef.current });
     
-    // Sempre limpamos o ID composto enviando apenas o ID limpo (title) para o Sheets
-    fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "updateTask", task: { ...updated, id: updated.title } }) }).catch(() => {});
+    // Sempre limpamos o ID composto enviando apenas o ID limpo (title) para o Sheets.
+    // targetColumn precisa ir mesmo quando o card NÃO está mudando de coluna — sem isso o
+    // backend não sabe em qual aba gravar a atualização (notas, subtarefas, checklist etc.)
+    // e a alteração nunca é persistida para os outros colaboradores verem.
+    fetch(API_URL, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "updateTask",
+        task: { ...updated, id: updated.title },
+        targetColumn: updated.sourceColumn,
+      }),
+    }).catch(() => {});
   };
 
   const handleColaboradorChange = async (taskId: string, newColaborador: string) => {
@@ -1574,7 +1590,7 @@ export default function App() {
             </button>
             <div>
               <h1 className="text-base font-black text-[#0f172a]">
-                {activeNav === "kanban" ? "Quadro Live (Ably)" : activeNav === "colaboradores" ? "Colaboradores" : activeNav === "relatorios" ? "Relatórios" : activeNav === "estoque" ? "Estoque" : "Configurações"}
+                {activeNav === "kanban" ? "Kanban ST" : activeNav === "colaboradores" ? "Colaboradores" : activeNav === "relatorios" ? "Relatórios" : activeNav === "estoque" ? "Estoque" : "Configurações"}
               </h1>
               <p className="text-xs text-slate-400 font-medium">
                 {totalTasks} cards · {concludedCount} concluídos
@@ -1616,6 +1632,23 @@ export default function App() {
                   ))}
                 </div>
               )}
+            </div>
+
+            <div className="flex items-center gap-2 pl-3 ml-1" style={{ borderLeft: "1px solid #e2e8f0" }}>
+              <div
+                className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[10px] shrink-0"
+                style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}
+                title={loggedInEmail}
+              >
+                {loggedInEmail.substring(0, 2).toUpperCase()}
+              </div>
+              <button
+                onClick={() => { if (confirm("Sair da sua conta?")) onLogout(); }}
+                className="p-2 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-rose-500 transition-colors"
+                title="Sair"
+              >
+                <LogOut size={15} />
+              </button>
             </div>
           </div>
         </header>
@@ -1786,5 +1819,400 @@ export default function App() {
       </div>
     </div>
     </ErrorBoundary>
+  );
+}
+
+// ─── TELA DE LOGIN / CRIAR CONTA ───
+type AuthMode = "entrar" | "cadastro";
+interface SessionInfo { email: string; token: string; }
+
+function LoginScreen({ onAuthenticated }: { onAuthenticated: (session: SessionInfo) => void }) {
+  const [mode, setMode] = useState<AuthMode>("entrar");
+  const [email, setEmail] = useState("");
+  const [senha, setSenha] = useState("");
+  const [confirmSenha, setConfirmSenha] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [showAdmin, setShowAdmin] = useState(false);
+
+  const resetMessages = () => { setError(""); setInfo(""); };
+
+  const handleEntrar = async () => {
+    resetMessages();
+    if (!email.trim() || !senha) { setError("Preencha e-mail e senha."); return; }
+    setSubmitting(true);
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        body: JSON.stringify({ action: "loginUser", email: email.trim(), senha }),
+      });
+      const result = await res.json().catch(() => ({ status: "error", message: "Resposta inválida do servidor." }));
+
+      if (result.status === "success" && result.approved) {
+        onAuthenticated({ email: result.email, token: result.token });
+        return;
+      }
+      if (result.status === "success" && result.pending) {
+        setInfo(result.message || "Seu cadastro está aguardando aprovação do administrador.");
+        return;
+      }
+      setError(result.message || "E-mail ou senha incorretos.");
+    } catch {
+      setError("Não foi possível conectar. Verifique sua internet.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleCadastro = async () => {
+    resetMessages();
+    if (!email.trim() || !senha) { setError("Preencha e-mail e senha."); return; }
+    if (senha.length < 4) { setError("Use uma senha com pelo menos 4 caracteres."); return; }
+    if (senha !== confirmSenha) { setError("As senhas não coincidem."); return; }
+    setSubmitting(true);
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        body: JSON.stringify({ action: "registerUser", email: email.trim(), senha }),
+      });
+      const result = await res.json().catch(() => ({ status: "error", message: "Resposta inválida do servidor." }));
+
+      if (result.status === "success") {
+        setMode("entrar");
+        setSenha("");
+        setConfirmSenha("");
+        setInfo("Cadastro enviado! Aguarde a liberação do administrador para entrar.");
+      } else {
+        setError(result.message || "Não foi possível criar a conta.");
+      }
+    } catch {
+      setError("Não foi possível conectar. Verifique sua internet.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitting) return;
+    if (mode === "entrar") handleEntrar(); else handleCadastro();
+  };
+
+  return (
+    <div className="flex h-screen items-center justify-center px-4" style={{ background: "#0f172a" }}>
+      <div className="relative w-full rounded-3xl shadow-2xl overflow-hidden" style={{ maxWidth: 400, background: "#fff" }}>
+        <div className="h-1.5 w-full" style={{ background: "linear-gradient(90deg, #4f46e5, #7c3aed, #db2777)" }} />
+
+        <div className="px-8 pt-8 pb-5">
+          <div className="w-11 h-11 rounded-2xl flex items-center justify-center mb-4" style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}>
+            <LayoutGrid size={20} className="text-white" />
+          </div>
+          <h1 className="text-xl font-black text-[#0f172a]">Kanban ST</h1>
+          <p className="text-xs text-slate-400 font-medium mt-1">
+            {mode === "entrar" ? "Entre com seu e-mail e senha." : "Crie sua conta para solicitar acesso."}
+          </p>
+        </div>
+
+        <div className="flex px-8 gap-1 mb-1">
+          {(["entrar", "cadastro"] as AuthMode[]).map(m => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => { setMode(m); resetMessages(); }}
+              className="flex-1 text-xs font-bold py-2.5 rounded-xl transition-all"
+              style={{
+                background: mode === m ? "#eef2ff" : "transparent",
+                color: mode === m ? "#4f46e5" : "#94a3b8",
+              }}
+            >
+              {m === "entrar" ? "Entrar" : "Criar conta"}
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={handleSubmit} className="px-8 pb-8 pt-4 space-y-3">
+          <div className="relative">
+            <Mail size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-300" />
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="seu@email.com"
+              autoComplete="username"
+              className="w-full text-sm pl-10 pr-3.5 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:border-indigo-300 transition-colors"
+            />
+          </div>
+          <div className="relative">
+            <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-300" />
+            <input
+              type="password"
+              value={senha}
+              onChange={e => setSenha(e.target.value)}
+              placeholder="Senha"
+              autoComplete={mode === "entrar" ? "current-password" : "new-password"}
+              className="w-full text-sm pl-10 pr-3.5 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:border-indigo-300 transition-colors"
+            />
+          </div>
+          {mode === "cadastro" && (
+            <div className="relative">
+              <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-300" />
+              <input
+                type="password"
+                value={confirmSenha}
+                onChange={e => setConfirmSenha(e.target.value)}
+                placeholder="Confirmar senha"
+                autoComplete="new-password"
+                className="w-full text-sm pl-10 pr-3.5 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:border-indigo-300 transition-colors"
+              />
+            </div>
+          )}
+
+          {error && (
+            <div className="flex items-start gap-2 text-xs font-medium px-3.5 py-2.5 rounded-xl border" style={{ background: "#fff1f2", borderColor: "#fecdd3", color: "#9f1239" }}>
+              <AlertCircle size={13} className="shrink-0 mt-0.5" /> {error}
+            </div>
+          )}
+          {info && (
+            <div className="flex items-start gap-2 text-xs font-medium px-3.5 py-2.5 rounded-xl border" style={{ background: "#fffbeb", borderColor: "#fde68a", color: "#92400e" }}>
+              <AlertCircle size={13} className="shrink-0 mt-0.5" /> {info}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={submitting}
+            className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-xl text-white transition-all"
+            style={{ background: submitting ? "#94a3b8" : "linear-gradient(135deg, #4f46e5, #4338ca)" }}
+          >
+            {submitting ? <RefreshCw size={14} className="animate-spin" /> : null}
+            {mode === "entrar" ? "Entrar" : "Solicitar acesso"}
+          </button>
+        </form>
+
+        <div className="px-8 pb-6 -mt-2 flex justify-center">
+          <button
+            type="button"
+            onClick={() => setShowAdmin(true)}
+            className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-indigo-500 transition-colors"
+          >
+            <ShieldCheck size={12} /> Sou administrador
+          </button>
+        </div>
+      </div>
+
+      {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
+    </div>
+  );
+}
+
+// ─── PAINEL DO ADMINISTRADOR (aprova ou nega os cadastros) ───
+interface PendingUser { email: string; status: string; }
+
+function AdminPanel({ onClose }: { onClose: () => void }) {
+  const [adminSenha, setAdminSenha] = useState("");
+  const [unlocked, setUnlocked] = useState(false);
+  const [users, setUsers] = useState<PendingUser[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [busyEmail, setBusyEmail] = useState<string | null>(null);
+
+  const loadUsers = async () => {
+    if (!adminSenha) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        body: JSON.stringify({ action: "adminListUsers", adminSenha }),
+      });
+      const result = await res.json().catch(() => ({ status: "error", message: "Resposta inválida." }));
+      if (result.status === "success") {
+        setUsers(result.users || []);
+        setUnlocked(true);
+      } else {
+        setError(result.message || "Senha de administrador incorreta.");
+      }
+    } catch {
+      setError("Não foi possível conectar.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateStatus = async (email: string, newStatus: string) => {
+    setBusyEmail(email);
+    setError("");
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        body: JSON.stringify({ action: "adminUpdateUserStatus", adminSenha, email, newStatus }),
+      });
+      const result = await res.json().catch(() => ({ status: "error" }));
+      if (result.status === "success") {
+        setUsers(prev => prev.map(u => u.email === email ? { ...u, status: newStatus } : u));
+      } else {
+        setError(result.message || "Não foi possível atualizar.");
+      }
+    } catch {
+      setError("Não foi possível conectar.");
+    } finally {
+      setBusyEmail(null);
+    }
+  };
+
+  const statusBadge = (status: string) => {
+    const s = (status || "pendente").toLowerCase();
+    if (s === "liberado") return { label: "Liberado", bg: "#f0fdf4", text: "#16a34a" };
+    if (s === "negado" || s === "sem acesso") return { label: "Negado", bg: "#fff1f2", text: "#e11d48" };
+    return { label: "Pendente", bg: "#fffbeb", text: "#d97706" };
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center px-4"
+      style={{ background: "rgba(10,16,36,0.7)", backdropFilter: "blur(6px)" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="relative w-full rounded-3xl shadow-2xl overflow-hidden flex flex-col" style={{ maxWidth: 440, maxHeight: "80vh", background: "#fff" }}>
+        <div className="h-1.5 w-full shrink-0" style={{ background: "linear-gradient(90deg, #4f46e5, #7c3aed, #db2777)" }} />
+        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-100 shrink-0">
+          <div className="flex items-center gap-2">
+            <ShieldCheck size={16} className="text-indigo-500" />
+            <h2 className="text-sm font-black text-[#0f172a]">Aprovação de acessos</h2>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-xl hover:bg-gray-100 text-[#6b7a99] transition-colors">
+            <X size={15} />
+          </button>
+        </div>
+
+        {!unlocked ? (
+          <div className="px-6 py-6 space-y-3">
+            <p className="text-xs text-slate-400">Digite a senha de administrador para ver as solicitações.</p>
+            <input
+              type="password"
+              value={adminSenha}
+              onChange={e => setAdminSenha(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && loadUsers()}
+              placeholder="Senha de administrador"
+              autoFocus
+              className="w-full text-sm px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:border-indigo-300"
+            />
+            {error && <p className="text-xs font-medium text-rose-600">{error}</p>}
+            <button
+              onClick={loadUsers}
+              disabled={loading || !adminSenha}
+              className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-xl text-white"
+              style={{ background: loading || !adminSenha ? "#94a3b8" : "#4f46e5" }}
+            >
+              {loading ? <RefreshCw size={14} className="animate-spin" /> : <ShieldCheck size={14} />}
+              Acessar
+            </button>
+          </div>
+        ) : (
+          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-2">
+            {error && <p className="text-xs font-medium text-rose-600 mb-2">{error}</p>}
+            {users.length === 0 && <p className="text-xs text-slate-400 text-center py-6">Nenhum cadastro encontrado.</p>}
+            {users.map(u => {
+              const badge = statusBadge(u.status);
+              const isBusy = busyEmail === u.email;
+              return (
+                <div key={u.email} className="flex items-center justify-between gap-2 px-3.5 py-3 rounded-2xl border border-gray-100" style={{ background: "#f8fafc" }}>
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-[#0f172a] truncate">{u.email}</p>
+                    <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md inline-block mt-1" style={{ background: badge.bg, color: badge.text }}>
+                      {badge.label}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {badge.label !== "Liberado" && (
+                      <button
+                        disabled={isBusy}
+                        onClick={() => updateStatus(u.email, "liberado")}
+                        className="text-[10px] font-black px-2.5 py-1.5 rounded-lg text-white"
+                        style={{ background: "#10b981", opacity: isBusy ? 0.6 : 1 }}
+                      >
+                        Aprovar
+                      </button>
+                    )}
+                    {badge.label !== "Negado" && (
+                      <button
+                        disabled={isBusy}
+                        onClick={() => updateStatus(u.email, "negado")}
+                        className="text-[10px] font-black px-2.5 py-1.5 rounded-lg"
+                        style={{ background: "#fff1f2", color: "#e11d48", opacity: isBusy ? 0.6 : 1 }}
+                      >
+                        Negar
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── PORTÃO DE AUTENTICAÇÃO ───
+// Decide se mostra a tela de login ou o quadro, e mantém a sessão salva no navegador.
+export default function App() {
+  const [session, setSession] = useState<SessionInfo | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      let saved: SessionInfo | null = null;
+      try { saved = JSON.parse(localStorage.getItem(LS_SESSION_KEY) || "null"); } catch {}
+      if (!saved?.email || !saved?.token) { setCheckingSession(false); return; }
+
+      try {
+        const res = await fetch(API_URL, {
+          method: "POST",
+          body: JSON.stringify({ action: "validateSession", email: saved.email, token: saved.token }),
+        });
+        const result = await res.json().catch(() => ({ status: "error" }));
+        if (result.status === "success") {
+          setSession(saved);
+        } else {
+          localStorage.removeItem(LS_SESSION_KEY);
+        }
+      } catch {
+        // Sem conexão agora: mantém a sessão local até conseguir validar de novo
+        setSession(saved);
+      }
+      setCheckingSession(false);
+    })();
+  }, []);
+
+  if (checkingSession) {
+    return (
+      <div className="flex h-screen items-center justify-center" style={{ background: "#0f172a" }}>
+        <RefreshCw size={22} className="text-indigo-400 animate-spin" />
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <LoginScreen
+        onAuthenticated={(s) => {
+          try { localStorage.setItem(LS_SESSION_KEY, JSON.stringify(s)); } catch {}
+          setSession(s);
+        }}
+      />
+    );
+  }
+
+  return (
+    <KanbanBoard
+      loggedInEmail={session.email}
+      onLogout={() => {
+        try { localStorage.removeItem(LS_SESSION_KEY); } catch {}
+        setSession(null);
+      }}
+    />
   );
 }
