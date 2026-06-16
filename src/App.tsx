@@ -158,13 +158,17 @@ interface ConsumoItem {
   quantidade: number;
 }
 
+interface EstoqueEntry { codigo: string; material: string; saldo: number; cluster: string; centro: string; }
+interface MaterialDoCluster { codigo: string; material: string; saldoTotal: number; centros: { centro: string; saldo: number }[]; }
+
 function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: KanbanTask, onConsumoRegistrado: () => void }) {
   const [itens, setItens] = useState<ConsumoItem[]>([{ codigo: task.codigoMaterial || "", quantidade: 1 }]);
   const [observacoes, setObservacoes] = useState("");
   const [enviando, setEnviando] = useState(false);
-  
-  // Alterado: Agora salva saldo e cluster também
-  const [listaEstoque, setListaEstoque] = useState<{ codigo: string; material: string; saldo: number; cluster: string }[]>([]);
+
+  // Lista completa do estoque (todos os clusters), com centro incluído
+  const [listaEstoque, setListaEstoque] = useState<EstoqueEntry[]>([]);
+  const [carregandoEstoque, setCarregandoEstoque] = useState(true);
 
   useEffect(() => {
     fetch(API_URL)
@@ -180,12 +184,30 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
               material: String(r.material ?? r.Material ?? r.MATERIAL ?? ""),
               saldo:    Number(r.saldo    ?? r.Saldo    ?? r.SALDO    ?? 0),
               cluster:  String(r.cluster  ?? r.Cluster  ?? r.CLUSTER  ?? "—"),
+              centro:   String(r.centro   ?? r.Centro   ?? r.CENTRO   ?? "—"),
             })));
           }
         }
       })
-      .catch(err => console.error("Erro ao puxar lista de autocomplete:", err));
+      .catch(err => console.error("Erro ao puxar lista de estoque:", err))
+      .finally(() => setCarregandoEstoque(false));
   }, []);
+
+  // Apenas os materiais do MESMO cluster da tarefa, agrupados por código
+  // (um código pode existir em mais de um centro dentro do mesmo cluster)
+  const materiaisDoCluster = useMemo<MaterialDoCluster[]>(() => {
+    const norm = (s: string) => (s || "").trim().toLowerCase();
+    const doCluster = listaEstoque.filter(e => norm(e.cluster) === norm(task.cluster || ""));
+    const grouped: Record<string, MaterialDoCluster> = {};
+    doCluster.forEach(e => {
+      const key = e.codigo.trim().toLowerCase();
+      if (!key) return;
+      if (!grouped[key]) grouped[key] = { codigo: e.codigo, material: e.material, saldoTotal: 0, centros: [] };
+      grouped[key].saldoTotal += e.saldo;
+      grouped[key].centros.push({ centro: e.centro, saldo: e.saldo });
+    });
+    return Object.values(grouped).sort((a, b) => a.material.localeCompare(b.material));
+  }, [listaEstoque, task.cluster]);
 
   const handleAdicionarMaterial = () => setItens([...itens, { codigo: "", quantidade: 1 }]);
   const handleRemoverMaterial = (index: number) => setItens(itens.filter((_, i) => i !== index));
@@ -196,7 +218,7 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
   };
 
   const handleEnviarConsumo = async () => {
-    if (itens.some(i => !i.codigo.trim())) { alert("Por favor, preencha o código de todos os materiais."); return; }
+    if (itens.some(i => !i.codigo.trim())) { alert("Por favor, selecione o material em todos os itens."); return; }
     if (itens.some(i => i.quantidade <= 0)) { alert("A quantidade de todos os materiais deve ser maior que zero."); return; }
 
     setEnviando(true);
@@ -205,8 +227,10 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
         method: "POST",
         body: JSON.stringify({
           action: "registrarRespostaMaterial",
-          id_tarefa: task.title,           
+          id_tarefa: task.title,
+          ionix: task.ionix || "",
           cluster: task.cluster || "—",
+          colaborador: task.colaborador || "",
           observacoes: observacoes.trim(),
           itens: itens // Enviando o array de itens corretamente
         }),
@@ -217,7 +241,11 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
       try { resData = JSON.parse(text); } catch { throw new Error("Resposta do servidor inválida."); }
 
       if (resData.status === "success") {
-        alert("Consumo registrado com sucesso! O estoque de todos os itens foi recalculado.");
+        let msg = "Consumo registrado com sucesso! O estoque de todos os itens foi recalculado.";
+        if (Array.isArray(resData.avisos) && resData.avisos.length) {
+          msg += "\n\nAtenção:\n" + resData.avisos.join("\n");
+        }
+        alert(msg);
         onConsumoRegistrado();
       } else {
         alert("Erro no backend: " + (resData.message || "Falha desconhecida"));
@@ -234,40 +262,49 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
       <div className="rounded-2xl p-4 border border-indigo-100 bg-indigo-50/50">
         <h3 className="text-sm font-black text-indigo-900 mb-1">Registrar Uso na Tarefa</h3>
         <p className="text-xs text-indigo-600">
-          Você pode dar baixa em múltiplos materiais. O sistema recalculará o estoque de cada item listado abaixo.
+          Apenas materiais do cluster <strong>{task.cluster || "—"}</strong> são exibidos abaixo. O sistema recalculará o estoque de cada item listado.
         </p>
       </div>
-      
+
       <div className="space-y-3">
         <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block">Lista de Materiais</label>
-        
+
+        {!carregandoEstoque && materiaisDoCluster.length === 0 && (
+          <div className="flex items-center gap-2 text-xs font-bold text-amber-600 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2.5">
+            <AlertCircle size={14} className="shrink-0" /> Nenhum material cadastrado no estoque para o cluster "{task.cluster}".
+          </div>
+        )}
+
         {itens.map((item, index) => {
-          // Busca todos os itens correspondentes ao código digitado
-          const correspondentes = listaEstoque.filter(e => e.codigo.toLowerCase() === item.codigo.trim().toLowerCase());
-          // Tenta pegar o do mesmo cluster da tarefa. Se não achar, pega o primeiro que vier.
-          const correspondente = correspondentes.find(c => c.cluster.toLowerCase() === (task.cluster || "").toLowerCase()) || correspondentes[0];
-          
+          const selecionado = materiaisDoCluster.find(m => m.codigo.toLowerCase() === item.codigo.trim().toLowerCase());
+          const temEstoque = !!selecionado && selecionado.saldoTotal > 0;
+
           return (
-            <div key={index} className="p-3 border border-slate-100 bg-slate-50/50 rounded-xl space-y-1">
+            <div key={index} className="p-3 border border-slate-100 bg-slate-50/50 rounded-xl space-y-1.5">
               <div className="flex items-center gap-2">
-                <div className="flex-1 relative">
-                  <input 
-                    type="text" 
-                    list="lista-autocomplete-materiais"
-                    value={item.codigo} 
-                    onChange={(e) => handleItemChange(index, "codigo", e.target.value)} 
-                    placeholder="Código (Ex: M-01)" 
-                    className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-white font-bold text-[#0f172a] focus:outline-none focus:border-indigo-500 uppercase" 
-                  />
+                <div className="flex-1">
+                  <select
+                    value={item.codigo}
+                    onChange={(e) => handleItemChange(index, "codigo", e.target.value)}
+                    disabled={carregandoEstoque || materiaisDoCluster.length === 0}
+                    className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-white font-bold text-[#0f172a] focus:outline-none focus:border-indigo-500 disabled:opacity-60"
+                  >
+                    <option value="">{carregandoEstoque ? "Carregando estoque..." : "Selecione um material..."}</option>
+                    {materiaisDoCluster.map(m => (
+                      <option key={m.codigo} value={m.codigo}>
+                        {m.material} — {m.codigo} ({m.saldoTotal > 0 ? `${m.saldoTotal} em estoque` : "sem estoque"})
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div className="w-24">
-                  <input 
-                    type="number" 
-                    min="1" 
-                    value={item.quantidade} 
-                    onChange={(e) => handleItemChange(index, "quantidade", Number(e.target.value))} 
+                  <input
+                    type="number"
+                    min="1"
+                    value={item.quantidade}
+                    onChange={(e) => handleItemChange(index, "quantidade", Number(e.target.value))}
                     placeholder="Qtd"
-                    className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-white font-bold text-[#0f172a] focus:outline-none focus:border-indigo-500" 
+                    className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-white font-bold text-[#0f172a] focus:outline-none focus:border-indigo-500"
                   />
                 </div>
                 {itens.length > 1 && (
@@ -277,13 +314,16 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
                 )}
               </div>
 
-              {/* Novo Visor de Saldo e Cluster */}
-              {correspondente && (
-                <div className="flex items-center gap-2 text-[10px] font-bold px-1 pt-1">
-                  <span className="text-indigo-600 truncate max-w-[200px]">📦 {correspondente.material}</span>
-                  <span className="text-slate-400 border-l border-slate-300 pl-2 shrink-0">Cluster: {correspondente.cluster}</span>
-                  <span className={`border-l border-slate-300 pl-2 shrink-0 ${correspondente.saldo > 0 ? "text-emerald-600" : "text-rose-500"}`}>
-                    Saldo em Estoque: {correspondente.saldo}
+              {/* Visor de Saldo / Centro, já filtrado pelo cluster da tarefa */}
+              {selecionado && (
+                <div className="flex items-center gap-2 text-[10px] font-bold px-1 pt-1 flex-wrap">
+                  <span className={`flex items-center gap-1 px-2 py-0.5 rounded-md ${temEstoque ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-500"}`}>
+                    {temEstoque ? "✅ Possui saldo" : "❌ Sem saldo"} ({selecionado.saldoTotal})
+                  </span>
+                  <span className="text-slate-400 border-l border-slate-300 pl-2 shrink-0">
+                    {selecionado.centros.length === 1
+                      ? `Centro: ${selecionado.centros[0].centro}`
+                      : `Centros: ${selecionado.centros.map(c => `${c.centro} (${c.saldo})`).join(", ")}`}
                   </span>
                 </div>
               )}
@@ -291,13 +331,7 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
           );
         })}
 
-        <datalist id="lista-autocomplete-materiais">
-          {listaEstoque.map((est, i) => (
-            <option key={i} value={est.codigo}>{est.material} ({est.cluster})</option>
-          ))}
-        </datalist>
-
-        <button type="button" onClick={handleAdicionarMaterial} className="flex items-center gap-1 text-xs font-black text-indigo-500 border border-dashed border-indigo-200 hover:bg-indigo-50 px-3 py-2 rounded-xl transition-colors">
+        <button type="button" onClick={handleAdicionarMaterial} disabled={materiaisDoCluster.length === 0} className="flex items-center gap-1 text-xs font-black text-indigo-500 border border-dashed border-indigo-200 hover:bg-indigo-50 px-3 py-2 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
           <Plus size={14} /> Adicionar mais um item
         </button>
       </div>
@@ -306,7 +340,7 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
         <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Observações adicionais</label>
         <textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} placeholder="Opcional..." rows={2} className="w-full text-sm px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-indigo-500 resize-none" />
       </div>
-      <button onClick={handleEnviarConsumo} disabled={enviando} className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl text-white transition-all shadow-md hover:opacity-90 disabled:bg-slate-300 disabled:cursor-not-allowed" style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}>
+      <button onClick={handleEnviarConsumo} disabled={enviando || materiaisDoCluster.length === 0} className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl text-white transition-all shadow-md hover:opacity-90 disabled:bg-slate-300 disabled:cursor-not-allowed" style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}>
         {enviando ? <><RefreshCw size={14} className="animate-spin" /> Registrando no Servidor...</> : "Confirmar e Dar Baixa no Estoque"}
       </button>
     </div>
@@ -962,7 +996,9 @@ interface RespostaItem {
   idTarefa: string;
   colaborador: string;
   cluster: string;
+  centro: string;
   codigo: string;
+  material: string;
   quantidade: string;
   observacoes: string;
 }
@@ -990,11 +1026,13 @@ function RespostasView() {
         }
 
         setRespostas(raw.map((r: any) => ({
-          timestamp:   String(r.timestamp || r.Timestamp || r.data || r.Data || "—"),
-          idTarefa:    String(r.idTarefa  || r.id || r.Id || r.IdTarefa || "—"),
+          timestamp:   String(r.data_consumo || r.timestamp || r.Timestamp || r.data || r.Data || "—"),
+          idTarefa:    String(r.id_tarefa || r.idTarefa || r.id || r.Id || r.IdTarefa || "—"),
           colaborador: String(r.colaborador || r.Colaborador || "—"),
           cluster:     String(r.cluster || r.Cluster || "—"),
+          centro:      String(r.centro || r.Centro || "—"),
           codigo:      String(r.codigo || r.Codigo || "—"),
+          material:    String(r.material || r["material cadastrado"] || r.Material || "—"),
           quantidade:  String(r.quantidade || r.Quantidade || "0"),
           observacoes: String(r.observacoes || r.Observacoes || ""),
         })));
@@ -1012,12 +1050,14 @@ function RespostasView() {
       return;
     }
 
-    const cabecalhos = ["Data/Hora", "ID Tarefa", "Colaborador", "Cluster", "Material Codigo", "Quantidade", "Observacoes"];
+    const cabecalhos = ["Data/Hora", "ID Tarefa", "Colaborador", "Cluster", "Centro", "Material", "Codigo", "Quantidade", "Observacoes"];
     const linhasCSV = filtered.map(item => [
       `"${item.timestamp.replace(/"/g, '""')}"`,
       `"${item.idTarefa.replace(/"/g, '""')}"`,
       `"${item.colaborador.replace(/"/g, '""')}"`,
       `"${item.cluster.replace(/"/g, '""')}"`,
+      `"${item.centro.replace(/"/g, '""')}"`,
+      `"${item.material.replace(/"/g, '""')}"`,
       `"${item.codigo.replace(/"/g, '""')}"`,
       `"${item.quantidade}"`,
       `"${item.observacoes.replace(/"/g, '""')}"`
@@ -1120,7 +1160,9 @@ function RespostasView() {
                 <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">ID Tarefa</th>
                 <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Colaborador</th>
                 <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Cluster</th>
-                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Material (Código)</th>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Centro</th>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Material</th>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Código</th>
                 <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Qtd.</th>
                 <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Observações</th>
               </tr>
@@ -1128,7 +1170,7 @@ function RespostasView() {
             <tbody>
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="text-center py-12 text-slate-300 text-sm font-semibold">
+                  <td colSpan={9} className="text-center py-12 text-slate-300 text-sm font-semibold">
                     Nenhum consumo encontrado
                   </td>
                 </tr>
@@ -1143,6 +1185,12 @@ function RespostasView() {
                       {item.cluster}
                     </span>
                   </td>
+                  <td className="px-4 py-3">
+                    <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-slate-100 text-slate-600">
+                      {item.centro}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-slate-600 max-w-[180px] truncate" title={item.material}>{item.material}</td>
                   <td className="px-4 py-3 font-bold text-slate-700">{item.codigo}</td>
                   <td className="px-4 py-3">
                     <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-rose-50 text-rose-600">
