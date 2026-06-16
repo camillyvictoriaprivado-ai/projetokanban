@@ -4,7 +4,8 @@ import {
   LayoutGrid, Users, BarChart3, Settings, Search, Filter, ChevronDown,
   Menu, CheckCircle, X, Plus, Trash2, ChevronRight, Calendar, User,
   Tag, FileText, ClipboardList, MessageSquare, Circle, CheckCircle2,
-  RefreshCw, AlertCircle, Zap, Package, Mail, Lock, ShieldCheck, LogOut
+  RefreshCw, AlertCircle, Zap, Package, Mail, Lock, ShieldCheck, LogOut,
+  Download, Upload
 } from "lucide-react";
 
 const API_URL = "https://script.google.com/macros/s/AKfycbzRN6LZWIgtuZ7IXkuc4-zP-vOoFSmeqQPEAYpzuVgdEGQX9eCiLIMAd2jWFZgoy9SdFA/exec";
@@ -50,12 +51,11 @@ class ErrorBoundary extends Component<{ children: React.ReactNode }, { hasError:
 const ABLY_API_KEY = "BUp6Lg.QfvVuw:DBQaijX7rEyBdz4A1dXnrDXE68wWcCWkQTUG_BLSk9E"; 
 const ABLY_CHANNEL_NAME = "kanban-live";
 
-// IMPORTANTE: Mudamos o sufixo das chaves para limpar o lixo do LocalStorage antigo que travava os cards juntos
 const LS_ANNOTATIONS_KEY = "tlp_kanban_annotations_v3"; 
 const LS_COLUMNS_KEY     = "tlp_kanban_columns_v3";     
 const LS_PENDING_KEY     = "tlp_kanban_pending_v3";     
 const LS_DELETED_KEY     = "tlp_kanban_deleted_v3";     
-const LS_SESSION_KEY     = "tlp_kanban_session_v1";      // sessão de login (email + token)
+const LS_SESSION_KEY     = "tlp_kanban_session_v1";      
 const PENDING_TTL_MS = 3 * 60 * 1000; 
 
 const COLLABORATORS = [
@@ -81,18 +81,16 @@ interface KanbanTask {
   colaboradorInitials: string; colaboradorColor: string; priority: Priority; dueDate: string; 
   steps: Step[]; tags: string[]; checklist: ChecklistItem[]; subtasks: Subtask[]; 
   annotations: Annotation[]; previousColumnId?: string;
-  rowkey?: string; // chave única da linha na planilha
-  sourceColumn?: string; // aba de origem no Sheets
-  codigoMaterial?: string; // código do material (aba "codigo")
-  saldoEstoque?: string | number; // saldo no estoque para o cluster (aba "estoque")
+  rowkey?: string; 
+  sourceColumn?: string; 
+  codigoMaterial?: string; 
+  saldoEstoque?: string | number; 
 }
 
 interface Column { id: string; title: string; color: string; accent: string; tasks: KanbanTask[]; }
 
 function getPersistKey(task: KanbanTask): string {
-  // rowkey é a chave única da linha na planilha — usa ela se existir
   if (task.rowkey) return `task:rk${task.rowkey}`;
-  // fallback: sourceColumn + title para diferenciar cards com mesmo título em abas diferentes
   return `task:${task.sourceColumn ?? "unknown"}:${task.title}`;
 }
 
@@ -149,6 +147,188 @@ function Toast({ message, type, onDismiss }: { message: string; type: "success" 
   );
 }
 
+// ─── COMPONENTE FORMULÁRIO DE CONSUMO DE MATERIAL (ATUALIZADO COM MULTI-ITENS E AUTOCOMPLETE) ───
+interface ConsumoItem {
+  codigo: string;
+  quantidade: number;
+}
+
+function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: KanbanTask, onConsumoRegistrado: () => void }) {
+  const [itens, setItens] = useState<ConsumoItem[]>([{ codigo: task.codigoMaterial || "", quantidade: 1 }]);
+  const [observacoes, setObservacoes] = useState("");
+  const [enviando, setEnviando] = useState(false);
+  const [listaEstoque, setListaEstoque] = useState<{ codigo: string; material: string }[]>([]);
+
+  // Carrega os dados de estoque assim que o modal abre para alimentar o autocomplete
+  useEffect(() => {
+    fetch(API_URL)
+      .then(r => r.text())
+      .then(text => {
+        if (text.trim().startsWith("{")) {
+          const data = JSON.parse(text);
+          const estoqueKey = Object.keys(data).find(k => k.toLowerCase() === "estoque");
+          const raw = estoqueKey ? data[estoqueKey] : [];
+          if (Array.isArray(raw)) {
+            setListaEstoque(raw.map((r: any) => ({
+              codigo:   String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? ""),
+              material: String(r.material ?? r.Material ?? r.MATERIAL ?? ""),
+            })));
+          }
+        }
+      })
+      .catch(err => console.error("Erro ao puxar lista de autocomplete:", err));
+  }, []);
+
+  const handleAdicionarMaterial = () => {
+    setItens([...itens, { codigo: "", quantidade: 1 }]);
+  };
+
+  const handleRemoverMaterial = (index: number) => {
+    setItens(itens.filter((_, i) => i !== index));
+  };
+
+  const handleItemChange = (index: number, campo: keyof ConsumoItem, valor: any) => {
+    const novosItens = [...itens];
+    novosItens[index] = { ...novosItens[index], [campo]: valor };
+    setItens(novosItens);
+  };
+
+  const handleEnviarConsumo = async () => {
+    if (itens.some(i => !i.codigo.trim())) {
+      alert("Por favor, preencha o código de todos os materiais.");
+      return;
+    }
+    if (itens.some(i => i.quantidade <= 0)) {
+      alert("A quantidade de todos os materiais deve ser maior que zero.");
+      return;
+    }
+
+    setEnviando(true);
+    try {
+      const response = await fetch(API_URL, {
+        method: "POST",
+        body: JSON.stringify({
+          action: "registrarRespostaMaterial",
+          id_tarefa: task.title,           
+          cluster: task.cluster || "—",
+          observacoes: observacoes.trim(),
+          itens: itens // Envia o lote de materiais completo em formato JSON array
+        }),
+      });
+
+      const text = await response.text();
+      let resData;
+      try { resData = JSON.parse(text); } catch { throw new Error("Resposta do servidor inválida."); }
+
+      if (resData.status === "success") {
+        alert("Consumo registrado com sucesso! O estoque de todos os itens informados foi recalculado.");
+        onConsumoRegistrado();
+      } else {
+        alert("Erro no backend: " + (resData.message || "Falha desconhecida"));
+      }
+    } catch (error: any) {
+      console.error("❌ Erro ao enviar consumo:", error);
+      alert("Falha ao salvar no banco de dados: " + error.message);
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-2xl p-4 border border-indigo-100 bg-indigo-50/50">
+        <h3 className="text-sm font-black text-indigo-900 mb-1">Registrar Uso na Tarefa</h3>
+        <p className="text-xs text-indigo-600">
+          Você pode dar baixa em <strong>múltiplos materiais</strong> de uma vez. O sistema enviará os registros individuais para o banco e dará baixa proporcional no estoque.
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">ID da Tarefa Vinculada</label>
+          <input type="text" disabled value={task.title} className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-100 font-bold text-slate-500 cursor-not-allowed" />
+        </div>
+        <div>
+          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Cluster</label>
+          <input type="text" disabled value={task.cluster || "—"} className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-100 font-bold text-slate-500 cursor-not-allowed" />
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block">Lista de Materiais</label>
+        
+        {itens.map((item, index) => {
+          // Busca o nome do material correspondente no autocomplete para exibir um preview
+          const correspondente = listaEstoque.find(e => e.codigo.toLowerCase() === item.codigo.trim().toLowerCase());
+          
+          return (
+            <div key={index} className="p-3 border border-slate-100 bg-slate-50/50 rounded-xl space-y-1">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 relative">
+                  <input 
+                    type="text" 
+                    list="lista-autocomplete-materiais"
+                    value={item.codigo} 
+                    onChange={(e) => handleItemChange(index, "codigo", e.target.value)} 
+                    placeholder="Código do Material (Ex: M-01)" 
+                    className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-white font-bold text-[#0f172a] focus:outline-none focus:border-indigo-500" 
+                  />
+                </div>
+                <div className="w-24">
+                  <input 
+                    type="number" 
+                    min="1" 
+                    value={item.quantidade} 
+                    onChange={(e) => handleItemChange(index, "quantidade", Number(e.target.value))} 
+                    placeholder="Qtd"
+                    className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-white font-bold text-[#0f172a] focus:outline-none focus:border-indigo-500" 
+                  />
+                </div>
+                {itens.length > 1 && (
+                  <button 
+                    type="button" 
+                    onClick={() => handleRemoverMaterial(index)}
+                    className="p-2.5 text-rose-500 hover:bg-rose-100 rounded-xl transition-colors border border-transparent"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </div>
+              {correspondente && (
+                <div className="text-[11px] font-bold text-indigo-600 px-1">
+                  📦 Item: {correspondente.material}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Componente Datalist HTML5 para Autocomplete nativo rápido */}
+        <datalist id="lista-autocomplete-materiais">
+          {listaEstoque.map((est, i) => (
+            <option key={i} value={est.codigo}>{est.material}</option>
+          ))}
+        </datalist>
+
+        <button
+          type="button"
+          onClick={handleAdicionarMaterial}
+          className="flex items-center gap-1 text-xs font-black text-indigo-500 border border-dashed border-indigo-200 hover:bg-indigo-50 px-3 py-2 rounded-xl transition-colors"
+        >
+          <Plus size={14} /> Adicionar mais um item
+        </button>
+      </div>
+
+      <div>
+        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Observações adicionais</label>
+        <textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} placeholder="Alguma nota sobre a aplicação deste material..." rows={3} className="w-full text-sm px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-indigo-500 resize-none" />
+      </div>
+      <button onClick={handleEnviarConsumo} disabled={enviando} className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl text-white transition-all shadow-md hover:opacity-90 disabled:bg-slate-300 disabled:cursor-not-allowed" style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}>
+        {enviando ? <><RefreshCw size={14} className="animate-spin" /> Registrando no Servidor...</> : "Confirmar e Dar Baixa no Estoque"}
+      </button>
+    </div>
+  );
+}
+
 function TaskDetailModal({
   task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn,
 }: {
@@ -159,7 +339,7 @@ function TaskDetailModal({
   onReturn: (colId: string, taskId: string) => void;
 }) {
   const [local, setLocal] = useState<KanbanTask>({ ...task });
-  const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes">("info");
+  const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes" | "consumo">("info");
   const [newCheckItem, setNewCheckItem] = useState("");
   const [newNote, setNewNote] = useState("");
   const [newSubtask, setNewSubtask] = useState({ title: "", colaborador: "", status: "pendente" as SubtaskStatus });
@@ -206,11 +386,13 @@ function TaskDetailModal({
 
   const prio = priorityBadge(local.priority);
   const doneChecks = local.checklist.filter(c => c.done).length;
+  
   const tabs = [
     { id: "info" as const,      label: "Detalhes",  icon: <FileText size={13} /> },
     { id: "checklist" as const, label: `Checklist${local.checklist.length ? ` ${doneChecks}/${local.checklist.length}` : ""}`, icon: <ClipboardList size={13} /> },
     { id: "subtasks" as const,  label: `Subtarefas${local.subtasks.length ? ` (${local.subtasks.length})` : ""}`, icon: <CheckCircle2 size={13} /> },
     { id: "notes" as const,     label: `Notas${local.annotations.length ? ` (${local.annotations.length})` : ""}`, icon: <MessageSquare size={13} /> },
+    { id: "consumo" as const,   label: "Baixar Material", icon: <Package size={13} /> }, 
   ];
 
   return (
@@ -486,13 +668,24 @@ function TaskDetailModal({
               </div>
             </div>
           )}
+
+          {activeTab === "consumo" && (
+            <FormularioConsumoMaterial 
+              task={local} 
+              onConsumoRegistrado={() => {
+                onClose();
+                window.location.reload(); 
+              }}
+            />
+          )}
+
         </div>
       </div>
     </div>
   );
 }
 
-// ─── TELA DE ESTOQUE ───
+// ─── TELA DE ESTOQUE (ATUALIZADO COM OPÇÃO DE IMPORTAR SALDOS NOVOS VIA CSV) ───
 interface EstoqueItem {
   codigo: string;
   material: string;
@@ -512,27 +705,22 @@ function EstoqueView() {
   const [filterCluster, setFilterCluster] = useState("Todos");
   const [sortBy, setSortBy] = useState<"material" | "saldo" | "cluster">("material");
   const [sortAsc, setSortAsc] = useState(true);
+  const [importando, setImportando] = useState(false);
+  
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
+  const carregarEstoque = () => {
     setLoading(true);
     fetch(API_URL)
       .then(r => r.text())
       .then(text => {
         if (!text.trim().startsWith("{")) throw new Error("Resposta inválida da API");
         const data = JSON.parse(text);
-        
-        // Debug: loga todas as chaves disponíveis no retorno da API
-        console.log("🔑 Chaves disponíveis na API:", Object.keys(data));
-        
-        // Tenta encontrar a aba de estoque ignorando maiúsculas/minúsculas
         const estoqueKey = Object.keys(data).find(k => k.toLowerCase() === "estoque");
-        console.log("📦 Chave de estoque encontrada:", estoqueKey);
-        
         const raw = estoqueKey ? data[estoqueKey] : [];
-        console.log("📋 Itens de estoque:", raw?.length, raw?.[0]);
         
         if (!Array.isArray(raw) || raw.length === 0) {
-          throw new Error(`A aba 'estoque' não está sendo exportada pelo backend.\n\nAdicione no doGet do Apps Script:\n  const estoqueSheet = getSheetByColumnId(ss, "estoque");\n  if (estoqueSheet) data["estoque"] = getTasksFromSheet(estoqueSheet);`);
+          throw new Error(`A aba 'estoque' não foi localizada ou está vazia.`);
         }
         setItems(raw.map((r: any) => ({
           codigo:   String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? "—"),
@@ -544,10 +732,73 @@ function EstoqueView() {
           deposito: String(r.deposito ?? r.Deposito ?? r.DEPOSITO ?? r.depósito ?? "—"),
           cluster:  String(r.cluster  ?? r.Cluster  ?? r.CLUSTER  ?? "—"),
         })));
+        setError(null);
       })
       .catch(e => { console.error("❌ Erro estoque:", e); setError(e.message); })
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    carregarEstoque();
   }, []);
+
+  const handleImportarCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const arquivo = e.target.files?.[0];
+    if (!arquivo) return;
+
+    const leitor = new FileReader();
+    leitor.onload = async (evento) => {
+      const conteudoTexto = evento.target?.result as string;
+      if (!conteudoTexto) return;
+
+      setImportando(true);
+      try {
+        const linhas = conteudoTexto.split(/\r?\n/).filter(l => l.trim() !== "");
+        if (linhas.length < 2) {
+          alert("O arquivo fornecido está vazio ou não possui linhas de dados.");
+          setImportando(false);
+          return;
+        }
+
+        // Detecta se a tabela usa vírgula ou ponto e vírgula como separador
+        const cabecalho = linhas[0];
+        const separador = cabecalho.includes(";") ? ";" : ",";
+        const colunasChave = cabecalho.split(separador).map(c => c.trim().toLowerCase());
+
+        const listaMapeada = linhas.slice(1).map(linha => {
+          const valores = linha.split(separador);
+          const objetoMontado: any = {};
+          colunasChave.forEach((chave, index) => {
+            objetoMontado[chave] = valores[index] ? valores[index].trim() : "";
+          });
+          return objetoMontado;
+        });
+
+        // Envia o payload completo direto para a macro processar a substituição dos saldos
+        const resposta = await fetch(API_URL, {
+          method: "POST",
+          body: JSON.stringify({
+            action: "importarEstoque",
+            dados: listaMapeada
+          })
+        });
+
+        const dataRes = await resposta.json();
+        if (dataRes.status === "success") {
+          alert("Saldos e Inventário atualizados com sucesso!");
+          carregarEstoque();
+        } else {
+          alert("Erro reportado pelo servidor: " + dataRes.message);
+        }
+      } catch (err: any) {
+        alert("Ocorreu um erro ao processar seu arquivo CSV local: " + err.message);
+      } finally {
+        setImportando(false);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    };
+    leitor.readAsText(arquivo, "UTF-8");
+  };
 
   const clusters = useMemo(() => ["Todos", ...Array.from(new Set(items.map(i => i.cluster).filter(c => c && c !== "—")))], [items]);
 
@@ -595,7 +846,6 @@ function EstoqueView() {
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden" style={{ background: "#f1f5f9" }}>
-      {/* Header da tela */}
       <div className="px-6 pt-5 pb-4 bg-white border-b border-slate-100 shrink-0">
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div>
@@ -603,7 +853,22 @@ function EstoqueView() {
             <p className="text-xs text-slate-400 mt-0.5">{filtered.length} itens · saldo total: <span className="font-bold text-indigo-600">{totalSaldo.toLocaleString("pt-BR")}</span> · <span className="text-rose-500 font-bold">{semEstoque} sem estoque</span></p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Search */}
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              onChange={handleImportarCSV} 
+              accept=".csv" 
+              className="hidden" 
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importando}
+              className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 border border-indigo-200 rounded-xl bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors disabled:opacity-50"
+            >
+              {importando ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
+              <span>Importar Saldos (CSV)</span>
+            </button>
+
             <div className="relative">
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
@@ -613,7 +878,6 @@ function EstoqueView() {
                 className="pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-xl bg-slate-50 w-44 focus:outline-none focus:border-indigo-300"
               />
             </div>
-            {/* Cluster filter */}
             <select
               value={filterCluster}
               onChange={e => setFilterCluster(e.target.value)}
@@ -625,7 +889,6 @@ function EstoqueView() {
         </div>
       </div>
 
-      {/* Tabela */}
       <div className="flex-1 overflow-auto px-6 py-4">
         <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
           <table className="w-full text-sm">
@@ -709,6 +972,212 @@ function EstoqueView() {
   );
 }
 
+// ─── TELA DE RESPOSTAS (ATUALIZADO COM BOTÃO DE DOWNLOAD EXCEL CSV COM BOM UTF8) ───
+interface RespostaItem {
+  timestamp: string;
+  idTarefa: string;
+  colaborador: string;
+  cluster: string;
+  codigo: string;
+  quantidade: string;
+  observacoes: string;
+}
+
+function RespostasView() {
+  const [respostas, setRespostas] = useState<RespostaItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [filterCluster, setFilterCluster] = useState("Todos");
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(API_URL)
+      .then(r => r.text())
+      .then(text => {
+        if (!text.trim().startsWith("{")) throw new Error("Resposta inválida da API");
+        const data = JSON.parse(text);
+        
+        const respostasKey = Object.keys(data).find(k => k.toLowerCase() === "respostas");
+        const raw = respostasKey ? data[respostasKey] : [];
+        
+        if (!Array.isArray(raw)) {
+          throw new Error("Formato de dados da aba 'respostas' inválido.");
+        }
+
+        setRespostas(raw.map((r: any) => ({
+          timestamp:   String(r.timestamp || r.Timestamp || r.data || r.Data || "—"),
+          idTarefa:    String(r.idTarefa  || r.id || r.Id || r.IdTarefa || "—"),
+          colaborador: String(r.colaborador || r.Colaborador || "—"),
+          cluster:     String(r.cluster || r.Cluster || "—"),
+          codigo:      String(r.codigo || r.Codigo || "—"),
+          quantidade:  String(r.quantidade || r.Quantidade || "0"),
+          observacoes: String(r.observacoes || r.Observacoes || ""),
+        })));
+      })
+      .catch(e => {
+        console.error("❌ Erro respostas:", e);
+        setError(e.message);
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleExportarExcel = () => {
+    if (filtered.length === 0) {
+      alert("Não existem dados disponíveis para exportação no filtro selecionado.");
+      return;
+    }
+
+    const cabecalhos = ["Data/Hora", "ID Tarefa", "Colaborador", "Cluster", "Material Codigo", "Quantidade", "Observacoes"];
+    const linhasCSV = filtered.map(item => [
+      `"${item.timestamp.replace(/"/g, '""')}"`,
+      `"${item.idTarefa.replace(/"/g, '""')}"`,
+      `"${item.colaborador.replace(/"/g, '""')}"`,
+      `"${item.cluster.replace(/"/g, '""')}"`,
+      `"${item.codigo.replace(/"/g, '""')}"`,
+      `"${item.quantidade}"`,
+      `"${item.observacoes.replace(/"/g, '""')}"`
+    ]);
+
+    // Cria a estrutura separada por ';' (padrão regional Excel brasileiro)
+    const corpoArquivo = [cabecalhos.join(";"), ...linhasCSV.map(l => l.join(";"))].join("\n");
+    
+    // Insere o caractere universal BOM (\uFEFF) para forçar o Excel a reconhecer UTF-8
+    const blob = new Blob(["\uFEFF" + corpoArquivo], { type: "text/csv;charset=utf-8;" });
+    const urlLink = URL.createObjectURL(blob);
+    
+    const tagLink = document.createElement("a");
+    tagLink.href = urlLink;
+    tagLink.download = `planilha_baixas_kanban_${new Date().toLocaleDateString().replace(/\//g, "-")}.csv`;
+    document.body.appendChild(tagLink);
+    tagLink.click();
+    document.body.removeChild(tagLink);
+  };
+
+  const clusters = useMemo(() => {
+    return ["Todos", ...Array.from(new Set(respostas.map(r => r.cluster).filter(c => c && c !== "—")))];
+  }, [respostas]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return respostas.filter(r => {
+      const matchCluster = filterCluster === "Todos" || r.cluster === filterCluster;
+      const matchSearch = !q || 
+        r.idTarefa.toLowerCase().includes(q) || 
+        r.colaborador.toLowerCase().includes(q) || 
+        r.codigo.toLowerCase().includes(q) ||
+        r.observacoes.toLowerCase().includes(q);
+      return matchCluster && matchSearch;
+    });
+  }, [respostas, search, filterCluster]);
+
+  if (loading) return (
+    <div className="flex-1 flex items-center justify-center" style={{ background: "#f1f5f9" }}>
+      <div className="flex items-center gap-2 text-slate-400 text-sm font-semibold">
+        <RefreshCw size={14} className="animate-spin text-indigo-400" /> Carregando histórico...
+      </div>
+    </div>
+  );
+
+  if (error) return (
+    <div className="flex-1 flex items-center justify-center" style={{ background: "#f1f5f9" }}>
+      <div className="text-center">
+        <AlertCircle size={28} className="mx-auto mb-2 text-rose-400" />
+        <p className="text-sm font-bold text-slate-600">{error}</p>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden" style={{ background: "#f1f5f9" }}>
+      <div className="px-6 pt-5 pb-4 bg-white border-b border-slate-100 shrink-0">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-base font-black text-[#0f172a]">Histórico de Consumos</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {filtered.length} baixas registradas no sistema
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handleExportarExcel}
+              className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 border border-emerald-200 rounded-xl bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors"
+            >
+              <Download size={13} />
+              <span>Exportar Planilha (Excel)</span>
+            </button>
+
+            <div className="relative">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Buscar id, código..."
+                className="pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-xl bg-slate-50 w-52 focus:outline-none focus:border-indigo-300"
+              />
+            </div>
+            <select
+              value={filterCluster}
+              onChange={e => setFilterCluster(e.target.value)}
+              className="text-sm border border-slate-200 rounded-xl bg-slate-50 px-3 py-2 focus:outline-none focus:border-indigo-300 text-slate-600 font-semibold"
+            >
+              {clusters.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-auto px-6 py-4">
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Data/Hora</th>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">ID Tarefa</th>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Colaborador</th>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Cluster</th>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Material (Código)</th>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Qtd.</th>
+                <th className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">Observações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="text-center py-12 text-slate-300 text-sm font-semibold">
+                    Nenhum consumo encontrado
+                  </td>
+                </tr>
+              )}
+              {filtered.map((item, idx) => (
+                <tr key={idx} className="border-t border-slate-50 hover:bg-slate-50 transition-colors">
+                  <td className="px-4 py-3 text-xs text-slate-500 font-mono whitespace-nowrap">{item.timestamp}</td>
+                  <td className="px-4 py-3 font-bold text-[#0f172a]">{item.idTarefa}</td>
+                  <td className="px-4 py-3 font-semibold text-slate-700">{item.colaborador}</td>
+                  <td className="px-4 py-3">
+                    <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-600">
+                      {item.cluster}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 font-bold text-slate-700">{item.codigo}</td>
+                  <td className="px-4 py-3">
+                    <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-rose-50 text-rose-600">
+                      - {item.quantidade}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-slate-600 max-w-xs truncate" title={item.observacoes}>
+                    {item.observacoes || <span className="text-slate-300 italic">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── TELA DE COLABORADORES ───
 function ColaboradoresView({ columns }: { columns: Column[] }) {
   const allTasks = columns.flatMap(col => col.tasks.map(t => ({ ...t, colId: col.id, colTitle: col.title, colColor: col.color })));
@@ -735,12 +1204,10 @@ function ColaboradoresView({ columns }: { columns: Column[] }) {
           <p className="text-sm text-slate-400 mt-0.5">Visão geral de carga e desempenho por pessoa</p>
         </div>
 
-        {/* Cards dos colaboradores */}
         <div className="grid grid-cols-1 gap-4 mb-6">
           {stats.map(c => (
             <div key={c.name} className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
               <div className="flex items-center gap-4 p-5">
-                {/* Avatar */}
                 <div
                   className="w-12 h-12 rounded-2xl flex items-center justify-center text-white font-black text-base shrink-0"
                   style={{ background: c.color }}
@@ -748,7 +1215,6 @@ function ColaboradoresView({ columns }: { columns: Column[] }) {
                   {c.initials}
                 </div>
 
-                {/* Nome + barra */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="font-black text-[#0f172a] text-sm">{c.name}</span>
@@ -777,14 +1243,12 @@ function ColaboradoresView({ columns }: { columns: Column[] }) {
                   </div>
                 </div>
 
-                {/* % */}
                 <div className="shrink-0 text-right">
                   <div className="text-2xl font-black" style={{ color: c.color }}>{c.pct}%</div>
                   <div className="text-[10px] font-bold text-slate-400">conclusão</div>
                 </div>
               </div>
 
-              {/* Lista de tasks */}
               {c.tasks.length > 0 && (
                 <div className="border-t border-slate-50 px-5 py-3">
                   <div className="flex flex-wrap gap-2">
@@ -814,7 +1278,6 @@ function ColaboradoresView({ columns }: { columns: Column[] }) {
           ))}
         </div>
 
-        {/* Não atribuídos */}
         {unassigned.length > 0 && (
           <div className="bg-white rounded-2xl shadow-sm border border-amber-100 p-5">
             <div className="flex items-center gap-2 mb-3">
@@ -846,21 +1309,18 @@ function RelatoriosView({ columns }: { columns: Column[] }) {
   const baixaOcup = allTasks.filter(t => t.colId === "baixaocupacao").length;
   const conclusionRate = total > 0 ? Math.round((concluded / total) * 100) : 0;
 
-  // Top colaboradores por conclusão
   const collabRanking = COLLABORATORS.map(c => {
     const mine = allTasks.filter(t => t.colaborador === c.name);
     const done = mine.filter(t => t.colId === "concluido").length;
     return { ...c, total: mine.length, done };
   }).sort((a, b) => b.done - a.done);
 
-  // Distribuição por coluna
   const colDist = columns.map(col => ({
     ...col,
     count: col.tasks.length,
     pct: total > 0 ? Math.round((col.tasks.length / total) * 100) : 0,
   }));
 
-  // Tasks por colaborador por coluna (heatmap simples)
   const matrix = COLLABORATORS.map(c => ({
     name: c.name,
     initials: c.initials,
@@ -876,7 +1336,6 @@ function RelatoriosView({ columns }: { columns: Column[] }) {
           <p className="text-sm text-slate-400 mt-0.5">Resumo geral do quadro</p>
         </div>
 
-        {/* KPIs */}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
           {[
             { label: "Total de cards",    val: total,          bg: "#f8fafc", color: "#0f172a",  accent: "#e2e8f0" },
@@ -892,7 +1351,6 @@ function RelatoriosView({ columns }: { columns: Column[] }) {
           ))}
         </div>
 
-        {/* Distribuição por coluna */}
         <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
           <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Distribuição por coluna</h3>
           <div className="space-y-3">
@@ -914,7 +1372,6 @@ function RelatoriosView({ columns }: { columns: Column[] }) {
         </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          {/* Ranking colaboradores */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
             <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Ranking por conclusão</h3>
             <div className="space-y-3">
@@ -942,7 +1399,6 @@ function RelatoriosView({ columns }: { columns: Column[] }) {
             </div>
           </div>
 
-          {/* Matriz colaborador × coluna */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 overflow-x-auto">
             <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Cards por coluna</h3>
             <table className="w-full text-xs">
@@ -988,7 +1444,6 @@ function RelatoriosView({ columns }: { columns: Column[] }) {
           </div>
         </div>
 
-        {/* Resumo: sem responsável */}
         {(() => {
           const unassigned = allTasks.filter(t => t.colaborador === "Não atribuído" && t.colId !== "concluido");
           if (unassigned.length === 0) return null;
@@ -1021,7 +1476,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
   const [filterColaborador, setFilterColaborador] = useState<string>("Todos");
   const [searchQuery, setSearchQuery] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [activeNav, setActiveNav] = useState("kanban");
+  const [activeNav, setActiveNav] = useState<string>("kanban");
   const [filterOpen, setFilterOpen] = useState(false);
   const [openTask, setOpenTask] = useState<{ task: KanbanTask; columnId: string } | null>(null);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "loading" } | null>(null);
@@ -1088,14 +1543,12 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
       try {
         const response = await fetch(API_URL);
         const text = await response.text();
-        // Google Sheets às vezes retorna HTML de erro em vez de JSON
         if (!text.trim().startsWith("{") && !text.trim().startsWith("[")) {
           throw new Error(`API retornou resposta inválida: ${text.substring(0, 100)}`);
         }
         data = JSON.parse(text);
       } catch (fetchErr) {
         console.error("Erro ao buscar/parsear API:", fetchErr);
-        // Se tiver dados em cache, mantém o que está na tela
         if (!silent) setLoading(false);
         return;
       }
@@ -1121,7 +1574,6 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
           rawTasks.forEach((task: any, index: number) => {
             if (!task) return;
             
-            // ID único: usa rowkey da planilha se existir, senão fallback para col+id+index
             const rawId = task.id ? String(task.id) : `task`;
             const rowkey = task.rowkey ? String(task.rowkey) : null;
             const uniqueId = rowkey ? `${col.id}-rk${rowkey}` : `${col.id}-${rawId}-${index}`;
@@ -1152,9 +1604,6 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
               saldoEstoque: task.saldo_estoque !== undefined && task.saldo_estoque !== null ? task.saldo_estoque : undefined,
             };
             const key = getPersistKey(builtTask);
-            // A planilha agora é a fonte de verdade (compartilhada entre todos os colaboradores).
-            // O cache local só entra como reforço se a planilha ainda não tiver nada salvo
-            // (ex.: alteração feita há poucos segundos, antes do POST terminar).
             if (!builtTask.annotations.length && savedAnnotations[key]?.length) {
               builtTask.annotations = savedAnnotations[key];
             }
@@ -1209,7 +1658,6 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
       }
     } catch (error) {
       console.error("Erro inesperado no loadKanban:", error);
-      // Garante que a tela não fica branca — mantém colunas vazias se não tiver nada
       setColumns(prev => prev.length > 0 ? prev : officialColumnsStructure.map(col => ({ ...col, tasks: [] })));
     } finally {
       setLoading(false);
@@ -1226,7 +1674,6 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
     ablyChannelRef.current = channel;
 
     channel.subscribe("taskMoved", (message) => {
-      // Ignora ecos enviados por nós mesmos
       if (message.data.senderId === myClientIdRef.current) return;
 
       const { taskId, fromColId, toColId, task } = message.data;
@@ -1273,10 +1720,6 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
     setColumns(prev => prev.map(col => ({ ...col, tasks: col.tasks.map(t => t.id === updated.id ? updated : t) })));
     ablyChannelRef.current?.publish("taskUpdated", { updatedTask: updated, senderId: myClientIdRef.current });
     
-    // Sempre limpamos o ID composto enviando apenas o ID limpo (title) para o Sheets.
-    // targetColumn precisa ir mesmo quando o card NÃO está mudando de coluna — sem isso o
-    // backend não sabe em qual aba gravar a atualização (notas, subtarefas, checklist etc.)
-    // e a alteração nunca é persistida para os outros colaboradores verem.
     fetch(API_URL, {
       method: "POST",
       body: JSON.stringify({
@@ -1428,7 +1871,6 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
     }
     if (!taskToMove) { setDragState(null); setDragOverCol(null); return; }
 
-    // Ao soltar o card, reformulamos o ID único do React para conter a nova coluna de destino
     const targetTaskId = `${toColId}-${taskToMove.title}-${Date.now()}`;
     const preparedTask = { ...taskToMove, id: targetTaskId };
 
@@ -1495,10 +1937,11 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
 
   const navItems = [
     { id: "kanban",        label: "Kanban",        icon: <LayoutGrid size={18} /> },
-    { id: "colaboradores", label: "Colaboradores",  icon: <Users size={18} /> },
-    { id: "relatorios",    label: "Relatórios",     icon: <BarChart3 size={18} /> },
-    { id: "estoque",       label: "Estoque",        icon: <Package size={18} /> },
-    { id: "configuracoes", label: "Configurações",  icon: <Settings size={18} /> },
+    { id: "colaboradores", label: "Colaboradores", icon: <Users size={18} /> },
+    { id: "relatorios",    label: "Relatórios",    icon: <BarChart3 size={18} /> },
+    { id: "estoque",       label: "Estoque",       icon: <Package size={18} /> },
+    { id: "respostas",     label: "Respostas",     icon: <MessageSquare size={18} /> }, 
+    { id: "configuracoes", label: "Configurações", icon: <Settings size={18} /> },
   ];
 
   const totalTasks = columns.reduce((a, c) => a + c.tasks.length, 0);
@@ -1590,7 +2033,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
             </button>
             <div>
               <h1 className="text-base font-black text-[#0f172a]">
-                {activeNav === "kanban" ? "Kanban ST" : activeNav === "colaboradores" ? "Colaboradores" : activeNav === "relatorios" ? "Relatórios" : activeNav === "estoque" ? "Estoque" : "Configurações"}
+                {activeNav === "kanban" ? "Kanban ST" : activeNav === "colaboradores" ? "Colaboradores" : activeNav === "relatorios" ? "Relatórios" : activeNav === "estoque" ? "Estoque" : activeNav === "respostas" ? "Respostas de Uso" : "Configurações"}
               </h1>
               <p className="text-xs text-slate-400 font-medium">
                 {totalTasks} cards · {concludedCount} concluídos
@@ -1636,7 +2079,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
 
             <div className="flex items-center gap-2 pl-3 ml-1" style={{ borderLeft: "1px solid #e2e8f0" }}>
               <div
-                className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[10px] shrink-0"
+                className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[10px] shrink-0 ring-2 ring-white"
                 style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}
                 title={loggedInEmail}
               >
@@ -1656,6 +2099,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
         {activeNav === "colaboradores" && <ColaboradoresView columns={columns} />}
         {activeNav === "relatorios" && <RelatoriosView columns={columns} />}
         {activeNav === "estoque" && <EstoqueView />}
+        {activeNav === "respostas" && <RespostasView />}
         {activeNav === "configuracoes" && (
           <div className="flex-1 flex items-center justify-center text-slate-400 text-sm font-semibold">
             <div className="text-center">
@@ -1707,7 +2151,6 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
                         className="bg-white rounded-2xl shadow-sm group hover:shadow-md transition-all cursor-grab active:cursor-grabbing overflow-hidden"
                         style={{
                           border: isDuplicate ? "1.5px solid #f59e0b" : "1px solid #e8ecf4",
-                          // A opacidade agora só afetará exatamente o card arrastado graças ao ID único!
                           opacity: dragState?.taskId === task.id ? 0.3 : 1,
                           background: isDuplicate ? "#fffdf0" : "#fff",
                         }}
@@ -1853,7 +2296,7 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (session: SessionIn
         onAuthenticated({ email: result.email, token: result.token });
         return;
       }
-      if (result.status === "success" && result.pending) {
+      if (result.status === "success" && result.approved === false && result.pending) {
         setInfo(result.message || "Seu cadastro está aguardando aprovação do administrador.");
         return;
       }
@@ -2006,7 +2449,7 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (session: SessionIn
   );
 }
 
-// ─── PAINEL DO ADMINISTRADOR (aprova ou nega os cadastros) ───
+// ─── PAINEL DO ADMINISTRADOR ───
 interface PendingUser { email: string; status: string; }
 
 function AdminPanel({ onClose }: { onClose: () => void }) {
@@ -2064,7 +2507,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   const statusBadge = (status: string) => {
     const s = (status || "pendente").toLowerCase();
     if (s === "liberado") return { label: "Liberado", bg: "#f0fdf4", text: "#16a34a" };
-    if (s === "negado" || s === "sem acesso") return { label: "Negado", bg: "#fff1f2", text: "#e11d48" };
+    if (s === "negado" || s === "sem access" || s === "sem acesso") return { label: "Negado", bg: "#fff1f2", text: "#e11d48" };
     return { label: "Pendente", bg: "#fffbeb", text: "#d97706" };
   };
 
@@ -2157,7 +2600,6 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
 }
 
 // ─── PORTÃO DE AUTENTICAÇÃO ───
-// Decide se mostra a tela de login ou o quadro, e mantém a sessão salva no navegador.
 export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
@@ -2180,7 +2622,6 @@ export default function App() {
           localStorage.removeItem(LS_SESSION_KEY);
         }
       } catch {
-        // Sem conexão agora: mantém a sessão local até conseguir validar de novo
         setSession(saved);
       }
       setCheckingSession(false);
