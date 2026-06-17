@@ -1542,6 +1542,369 @@ function RespostasView() {
   );
 }
 
+// ─── TELA DE REQUISIÇÕES DE MATERIAL ───
+interface RequisicaoViewItem {
+  timestamp: string;
+  idTarefa: string;
+  ionix: string;
+  cluster: string;
+  colaborador: string;
+  codigoOriginal: string;
+  materialOriginal: string;
+  codigoSubstituto: string;
+  materialSubstituto: string;
+  quantidade: number;
+  observacoes: string;
+}
+
+function RequisicaoView() {
+  const [itens, setItens] = useState<RequisicaoViewItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [filterCluster, setFilterCluster] = useState("Todos");
+  const [activeTab, setActiveTab] = useState<"tabela" | "grafico">("tabela");
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(API_URL)
+      .then(r => r.text())
+      .then(text => {
+        if (!text.trim().startsWith("{")) throw new Error("Resposta inválida da API");
+        const data = JSON.parse(text);
+        const key = Object.keys(data).find(k => k.toLowerCase().replace(/\s+/g,"") === "registrarrequisicaomaterial");
+        const raw = key ? data[key] : [];
+        if (!Array.isArray(raw)) throw new Error("Aba de requisições não encontrada ou vazia.");
+        setItens(raw.map((r: any) => ({
+          timestamp:          String(r.timestamp          ?? r.data          ?? r.Data          ?? "—"),
+          idTarefa:           String(r.id_tarefa          ?? r.idTarefa      ?? r.Id_tarefa     ?? "—"),
+          ionix:              String(r.ionix              ?? r.Ionix         ?? "—"),
+          cluster:            String(r.cluster            ?? r.Cluster       ?? "—"),
+          colaborador:        String(r.colaborador        ?? r.Colaborador   ?? "—"),
+          codigoOriginal:     String(r.codigooriginal     ?? r.codigoOriginal     ?? r.codigo_original     ?? "—"),
+          materialOriginal:   String(r.materialoriginal   ?? r.materialOriginal   ?? r.material_original   ?? "—"),
+          codigoSubstituto:   String(r.codigosubstituto   ?? r.codigoSubstituto   ?? r.codigo_substituto   ?? "—"),
+          materialSubstituto: String(r.materialsubstituto ?? r.materialSubstituto ?? r.material_substituto ?? "—"),
+          quantidade:         Number(r.quantidade ?? r.Quantidade ?? 0),
+          observacoes:        String(r.observacoes ?? r.Observacoes ?? ""),
+        })));
+        setError(null);
+      })
+      .catch(e => { console.error("❌ Erro requisições:", e); setError(e.message); })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const clusters = useMemo(() => ["Todos", ...Array.from(new Set(itens.map(i => i.cluster).filter(c => c && c !== "—")))], [itens]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return itens.filter(i => {
+      const matchCluster = filterCluster === "Todos" || i.cluster === filterCluster;
+      const matchSearch = !q ||
+        i.idTarefa.toLowerCase().includes(q) ||
+        i.materialOriginal.toLowerCase().includes(q) ||
+        i.materialSubstituto.toLowerCase().includes(q) ||
+        i.codigoOriginal.toLowerCase().includes(q) ||
+        i.colaborador.toLowerCase().includes(q);
+      return matchCluster && matchSearch;
+    });
+  }, [itens, search, filterCluster]);
+
+  // Ranking: materiais mais requisitados (que faltaram)
+  const rankingMateriais = useMemo(() => {
+    const map: Record<string, { material: string; codigo: string; total: number; vezes: number }> = {};
+    filtered.forEach(i => {
+      const key = i.codigoOriginal;
+      if (!map[key]) map[key] = { material: i.materialOriginal, codigo: i.codigoOriginal, total: 0, vezes: 0 };
+      map[key].total += i.quantidade;
+      map[key].vezes += 1;
+    });
+    return Object.values(map).sort((a, b) => b.total - a.total).slice(0, 10);
+  }, [filtered]);
+
+  // Ranking de substitutos mais usados
+  const rankingSubstitutos = useMemo(() => {
+    const map: Record<string, { material: string; codigo: string; total: number }> = {};
+    filtered.forEach(i => {
+      const key = i.codigoSubstituto;
+      if (!map[key]) map[key] = { material: i.materialSubstituto, codigo: i.codigoSubstituto, total: 0 };
+      map[key].total += i.quantidade;
+    });
+    return Object.values(map).sort((a, b) => b.total - a.total).slice(0, 5);
+  }, [filtered]);
+
+  const totalRequisicoes = filtered.length;
+  const totalQtd = filtered.reduce((a, i) => a + i.quantidade, 0);
+  const materiaisUnicos = new Set(filtered.map(i => i.codigoOriginal)).size;
+
+  const handleExportar = () => {
+    if (filtered.length === 0) { alert("Nenhum dado para exportar."); return; }
+    const cab = ["Data/Hora","ID Tarefa","Ionix","Cluster","Colaborador","Cód. Original","Material Original","Cód. Substituto","Material Substituto","Quantidade","Observações"];
+    const linhas = filtered.map(i => [
+      `"${i.timestamp}"`, `"${i.idTarefa}"`, `"${i.ionix}"`, `"${i.cluster}"`, `"${i.colaborador}"`,
+      `"${i.codigoOriginal}"`, `"${i.materialOriginal.replace(/"/g,'""')}"`  ,
+      `"${i.codigoSubstituto}"`, `"${i.materialSubstituto.replace(/"/g,'""')}"`  ,
+      i.quantidade, `"${i.observacoes.replace(/"/g,'""')}"` 
+    ]);
+    const csv = [cab.join(";"), ...linhas.map(l => l.join(";"))].join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `requisicoes_material_${new Date().toLocaleDateString().replace(/\//g,"-")}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  };
+
+  const maxRanking = rankingMateriais[0]?.total || 1;
+
+  if (loading) return (
+    <div className="flex-1 flex items-center justify-center" style={{ background: "#f1f5f9" }}>
+      <div className="flex items-center gap-2 text-slate-400 text-sm font-semibold">
+        <RefreshCw size={14} className="animate-spin text-amber-400" /> Carregando requisições...
+      </div>
+    </div>
+  );
+
+  if (error) return (
+    <div className="flex-1 flex items-center justify-center" style={{ background: "#f1f5f9" }}>
+      <div className="text-center">
+        <AlertCircle size={28} className="mx-auto mb-2 text-rose-400" />
+        <p className="text-sm font-bold text-slate-600">{error}</p>
+        <p className="text-xs text-slate-400 mt-1">Verifique se a aba "registrarrequisicaomaterial" existe no Sheets.</p>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden" style={{ background: "#f1f5f9" }}>
+      {/* Header */}
+      <div className="px-6 pt-5 pb-4 bg-white border-b border-slate-100 shrink-0">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-base font-black text-[#0f172a]">Requisições de Material</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              <span className="font-bold text-amber-600">{totalRequisicoes}</span> registros ·{" "}
+              <span className="font-bold text-rose-500">{materiaisUnicos}</span> materiais diferentes ·{" "}
+              <span className="font-bold text-slate-600">{totalQtd}</span> unidades requisitadas
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handleExportar}
+              className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 border border-emerald-200 rounded-xl bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors"
+            >
+              <Download size={13} /> Exportar Planilha
+            </button>
+            <div className="flex rounded-xl border border-slate-200 overflow-hidden bg-slate-50">
+              <button
+                onClick={() => setActiveTab("tabela")}
+                className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 transition-colors"
+                style={{ background: activeTab === "tabela" ? "#4f46e5" : "transparent", color: activeTab === "tabela" ? "#fff" : "#64748b" }}
+              >
+                <ClipboardList size={13} /> Tabela
+              </button>
+              <button
+                onClick={() => setActiveTab("grafico")}
+                className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 transition-colors"
+                style={{ background: activeTab === "grafico" ? "#4f46e5" : "transparent", color: activeTab === "grafico" ? "#fff" : "#64748b" }}
+              >
+                <BarChart3 size={13} /> Gráfico
+              </button>
+            </div>
+            <div className="relative">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={search} onChange={e => setSearch(e.target.value)}
+                placeholder="Material, ID, colaborador..."
+                className="pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-xl bg-slate-50 w-52 focus:outline-none focus:border-amber-300"
+              />
+            </div>
+            <select
+              value={filterCluster} onChange={e => setFilterCluster(e.target.value)}
+              className="text-sm border border-slate-200 rounded-xl bg-slate-50 px-3 py-2 focus:outline-none focus:border-amber-300 text-slate-600 font-semibold"
+            >
+              {clusters.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-auto px-6 py-4">
+
+        {/* ── VISÃO GRÁFICO ── */}
+        {activeTab === "grafico" && (
+          <div className="space-y-4">
+            {/* Cards resumo */}
+            <div className="grid grid-cols-3 gap-4">
+              {[
+                { label: "Total de Requisições", value: totalRequisicoes, color: "#f97316", bg: "#fff7ed", border: "#fed7aa" },
+                { label: "Materiais Distintos",  value: materiaisUnicos,  color: "#e11d48", bg: "#fff1f2", border: "#fecdd3" },
+                { label: "Unidades Faltantes",   value: totalQtd,         color: "#7c3aed", bg: "#faf5ff", border: "#e9d5ff" },
+              ].map(card => (
+                <div key={card.label} className="rounded-2xl p-5 border" style={{ background: card.bg, borderColor: card.border }}>
+                  <p className="text-[10px] font-black uppercase tracking-widest mb-1" style={{ color: card.color }}>{card.label}</p>
+                  <p className="text-3xl font-black" style={{ color: card.color }}>{card.value.toLocaleString("pt-BR")}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              {/* Ranking materiais que mais faltaram */}
+              <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-7 h-7 rounded-xl flex items-center justify-center" style={{ background: "#fff1f2" }}>
+                    <AlertCircle size={14} className="text-rose-500" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-black text-[#0f172a]">Materiais mais requisitados</p>
+                    <p className="text-[10px] text-slate-400">que faltaram no estoque</p>
+                  </div>
+                </div>
+                {rankingMateriais.length === 0 ? (
+                  <p className="text-xs text-slate-400 text-center py-6">Nenhum dado</p>
+                ) : (
+                  <div className="space-y-2.5">
+                    {rankingMateriais.map((m, i) => {
+                      const pct = Math.round((m.total / maxRanking) * 100);
+                      const colors = ["#e11d48","#f97316","#d97706","#7c3aed","#4f46e5","#0891b2","#059669","#64748b","#9333ea","#db2777"];
+                      const cor = colors[i % colors.length];
+                      return (
+                        <div key={m.codigo}>
+                          <div className="flex items-center justify-between mb-0.5">
+                            <span className="text-xs font-bold text-[#0f172a] truncate max-w-[65%]" title={m.material}>
+                              {i+1}. {m.material || m.codigo}
+                            </span>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <span className="text-[10px] text-slate-400">{m.vezes}x</span>
+                              <span className="text-xs font-black" style={{ color: cor }}>{m.total} un.</span>
+                            </div>
+                          </div>
+                          <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                            <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: cor }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Ranking substitutos */}
+              <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-7 h-7 rounded-xl flex items-center justify-center" style={{ background: "#f0fdf4" }}>
+                    <CheckCircle size={14} className="text-emerald-500" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-black text-[#0f172a]">Substitutos mais utilizados</p>
+                    <p className="text-[10px] text-slate-400">materiais usados no lugar</p>
+                  </div>
+                </div>
+                {rankingSubstitutos.length === 0 ? (
+                  <p className="text-xs text-slate-400 text-center py-6">Nenhum dado</p>
+                ) : (
+                  <div className="space-y-3">
+                    {rankingSubstitutos.map((m, i) => {
+                      const maxSub = rankingSubstitutos[0]?.total || 1;
+                      const pct = Math.round((m.total / maxSub) * 100);
+                      const cores = ["#059669","#0891b2","#4f46e5","#7c3aed","#d97706"];
+                      const cor = cores[i % cores.length];
+                      return (
+                        <div key={m.codigo}>
+                          <div className="flex items-center justify-between mb-0.5">
+                            <span className="text-xs font-bold text-[#0f172a] truncate max-w-[70%]" title={m.material}>
+                              {i+1}. {m.material || m.codigo}
+                            </span>
+                            <span className="text-xs font-black shrink-0" style={{ color: cor }}>{m.total} un.</span>
+                          </div>
+                          <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                            <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: cor }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Por cluster */}
+                {filtered.length > 0 && (
+                  <div className="mt-5 pt-4 border-t border-slate-100">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">Requisições por cluster</p>
+                    <div className="space-y-1.5">
+                      {Array.from(new Set(filtered.map(i => i.cluster).filter(c => c !== "—")))
+                        .map(cluster => {
+                          const count = filtered.filter(i => i.cluster === cluster).length;
+                          const pct = Math.round((count / filtered.length) * 100);
+                          return (
+                            <div key={cluster} className="flex items-center gap-2">
+                              <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-600 shrink-0 w-24 truncate">{cluster}</span>
+                              <div className="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                                <div className="h-full rounded-full bg-indigo-400" style={{ width: `${pct}%` }} />
+                              </div>
+                              <span className="text-[10px] font-bold text-slate-500 w-8 text-right">{count}</span>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── VISÃO TABELA ── */}
+        {activeTab === "tabela" && (
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                  {["Data/Hora","ID","Cluster","Colaborador","Material Requisitado","Cód.","Material Substituto","Qtd.","Obs."].map(col => (
+                    <th key={col} className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 whitespace-nowrap">{col}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.length === 0 && (
+                  <tr>
+                    <td colSpan={9} className="text-center py-12 text-slate-300 text-sm font-semibold">
+                      Nenhuma requisição encontrada
+                    </td>
+                  </tr>
+                )}
+                {filtered.map((item, idx) => (
+                  <tr key={idx} className="border-t border-slate-50 hover:bg-amber-50/30 transition-colors">
+                    <td className="px-4 py-3 text-xs text-slate-400 font-mono whitespace-nowrap">{item.timestamp}</td>
+                    <td className="px-4 py-3 font-bold text-[#0f172a] text-xs">{item.idTarefa}</td>
+                    <td className="px-4 py-3">
+                      <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-600">{item.cluster}</span>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-600 font-semibold">{item.colaborador}</td>
+                    <td className="px-4 py-3 max-w-[160px]">
+                      <span className="text-xs font-bold text-rose-700 truncate block" title={item.materialOriginal}>{item.materialOriginal}</span>
+                      <span className="text-[10px] text-slate-400 font-mono">{item.codigoOriginal}</span>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-400">{item.codigoOriginal}</td>
+                    <td className="px-4 py-3 max-w-[160px]">
+                      <span className="text-xs font-bold text-emerald-700 truncate block" title={item.materialSubstituto}>{item.materialSubstituto}</span>
+                      <span className="text-[10px] text-slate-400 font-mono">{item.codigoSubstituto}</span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-amber-50 text-amber-700">{item.quantidade}</span>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-400 max-w-[120px] truncate" title={item.observacoes}>
+                      {item.observacoes || <span className="text-slate-200 italic">—</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── TELA DE COLABORADORES ───
 function ColaboradoresView({ columns }: { columns: Column[] }) {
   const allTasks = columns.flatMap(col => col.tasks.map(t => ({ ...t, colId: col.id, colTitle: col.title, colColor: col.color })));
@@ -2330,7 +2693,8 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
     { id: "colaboradores", label: "Colaboradores", icon: <Users size={18} /> },
     { id: "relatorios",    label: "Relatórios",    icon: <BarChart3 size={18} /> },
     { id: "estoque",       label: "Estoque",       icon: <Package size={18} /> },
-    { id: "respostas",     label: "Respostas",     icon: <MessageSquare size={18} /> }, 
+    { id: "respostas",     label: "Respostas",     icon: <MessageSquare size={18} /> },
+    { id: "requisicoes",   label: "Requisições",   icon: <Upload size={18} /> },
     { id: "configuracoes", label: "Configurações", icon: <Settings size={18} /> },
   ];
 
@@ -2428,7 +2792,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
             </button>
             <div>
               <h1 className="text-base font-black text-[#0f172a]">
-                {activeNav === "kanban" ? "Kanban ST" : activeNav === "colaboradores" ? "Colaboradores" : activeNav === "relatorios" ? "Relatórios" : activeNav === "estoque" ? "Estoque" : activeNav === "respostas" ? "Respostas de Uso" : "Configurações"}
+                {activeNav === "kanban" ? "Kanban ST" : activeNav === "colaboradores" ? "Colaboradores" : activeNav === "relatorios" ? "Relatórios" : activeNav === "estoque" ? "Estoque" : activeNav === "respostas" ? "Respostas de Uso" : activeNav === "requisicoes" ? "Requisições de Material" : "Configurações"}
               </h1>
               <p className="text-xs text-slate-400 font-medium">
                 {totalTasks} cards · {concludedCount} concluídos
@@ -2495,6 +2859,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
         {activeNav === "relatorios" && <RelatoriosView columns={columns} />}
         {activeNav === "estoque" && <EstoqueView />}
         {activeNav === "respostas" && <RespostasView />}
+        {activeNav === "requisicoes" && <RequisicaoView />}
         {activeNav === "configuracoes" && (
           <div className="flex-1 flex items-center justify-center text-slate-400 text-sm font-semibold">
             <div className="text-center">
