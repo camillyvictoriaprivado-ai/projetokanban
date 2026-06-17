@@ -158,33 +158,54 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
   const [itens, setItens] = useState<RequisicaoItem[]>([{ codigoOriginal: task.codigoMaterial || "", codigoSubstituto: "", quantidade: 1 }]);
   const [observacoes, setObservacoes] = useState("");
   const [enviando, setEnviando] = useState(false);
+
+  // Catálogo completo (aba "codigo") — inclui materiais sem estoque
+  const [catalogoMateriais, setCatalogoMateriais] = useState<{ codigo: string; material: string }[]>([]);
+  // Estoque para o select de substituto
   const [listaEstoque, setListaEstoque] = useState<EstoqueEntry[]>([]);
-  const [carregandoEstoque, setCarregandoEstoque] = useState(true);
+  const [carregando, setCarregando] = useState(true);
 
   useEffect(() => {
     fetch(API_URL)
       .then(r => r.text())
       .then(text => {
-        if (text.trim().startsWith("{")) {
-          const data = JSON.parse(text);
-          const estoqueKey = Object.keys(data).find(k => k.toLowerCase() === "estoque");
-          const raw = estoqueKey ? data[estoqueKey] : [];
-          if (Array.isArray(raw)) {
-            setListaEstoque(raw.map((r: any) => ({
-              codigo:   String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? ""),
-              material: String(r.material ?? r.Material ?? r.MATERIAL ?? ""),
-              saldo:    Number(r.saldo    ?? r.Saldo    ?? r.SALDO    ?? 0),
-              cluster:  String(r.cluster  ?? r.Cluster  ?? r.CLUSTER  ?? "—"),
-              centro:   String(r.centro   ?? r.Centro   ?? r.CENTRO   ?? "—"),
-            })));
-          }
+        if (!text.trim().startsWith("{")) return;
+        const data = JSON.parse(text);
+
+        // Aba "codigo" → catálogo completo para "material que faltou"
+        const codigoKey = Object.keys(data).find(k => k.toLowerCase() === "codigo");
+        const rawCodigo = codigoKey ? data[codigoKey] : [];
+        if (Array.isArray(rawCodigo)) {
+          setCatalogoMateriais(
+            rawCodigo
+              .map((r: any) => ({
+                codigo:   String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? "").trim(),
+                material: String(r.descricao ?? r.Descricao ?? r.DESCRICAO ?? r.material ?? r.Material ?? r.MATERIAL ?? "").trim(),
+              }))
+              .filter(r => r.codigo)
+              .sort((a, b) => a.material.localeCompare(b.material))
+          );
+        }
+
+        // Aba "estoque" → para o select de substituto (com saldo visível)
+        const estoqueKey = Object.keys(data).find(k => k.toLowerCase() === "estoque");
+        const rawEstoque = estoqueKey ? data[estoqueKey] : [];
+        if (Array.isArray(rawEstoque)) {
+          setListaEstoque(rawEstoque.map((r: any) => ({
+            codigo:   String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? ""),
+            material: String(r.material ?? r.Material ?? r.MATERIAL ?? ""),
+            saldo:    Number(r.saldo    ?? r.Saldo    ?? r.SALDO    ?? 0),
+            cluster:  String(r.cluster  ?? r.Cluster  ?? r.CLUSTER  ?? "—"),
+            centro:   String(r.centro   ?? r.Centro   ?? r.CENTRO   ?? "—"),
+          })));
         }
       })
-      .catch(err => console.error("Erro ao puxar lista de estoque:", err))
-      .finally(() => setCarregandoEstoque(false));
+      .catch(err => console.error("Erro ao carregar dados:", err))
+      .finally(() => setCarregando(false));
   }, []);
 
-  const todosOsMateriais = useMemo<MaterialDoCluster[]>(() => {
+  // Substituto: todos do estoque agrupados por código (qualquer cluster)
+  const materiaisSubstituto = useMemo<MaterialDoCluster[]>(() => {
     const grouped: Record<string, MaterialDoCluster> = {};
     listaEstoque.forEach(e => {
       const key = e.codigo.trim().toLowerCase();
@@ -195,20 +216,6 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
     });
     return Object.values(grouped).sort((a, b) => a.material.localeCompare(b.material));
   }, [listaEstoque]);
-
-  const materiaisDoCluster = useMemo<MaterialDoCluster[]>(() => {
-    const norm = (s: string) => (s || "").trim().toLowerCase();
-    const doCluster = listaEstoque.filter(e => norm(e.cluster) === norm(task.cluster || ""));
-    const grouped: Record<string, MaterialDoCluster> = {};
-    doCluster.forEach(e => {
-      const key = e.codigo.trim().toLowerCase();
-      if (!key) return;
-      if (!grouped[key]) grouped[key] = { codigo: e.codigo, material: e.material, saldoTotal: 0, centros: [] };
-      grouped[key].saldoTotal += e.saldo;
-      grouped[key].centros.push({ centro: e.centro, saldo: e.saldo });
-    });
-    return Object.values(grouped).sort((a, b) => a.material.localeCompare(b.material));
-  }, [listaEstoque, task.cluster]);
 
   const handleAdicionarItem = () => setItens([...itens, { codigoOriginal: "", codigoSubstituto: "", quantidade: 1 }]);
   const handleRemoverItem = (index: number) => setItens(itens.filter((_, i) => i !== index));
@@ -235,8 +242,8 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
           colaborador: task.colaborador || "",
           observacoes: observacoes.trim(),
           itens: itens.map(i => {
-            const original   = todosOsMateriais.find(m => m.codigo.toLowerCase() === i.codigoOriginal.trim().toLowerCase());
-            const substituto = todosOsMateriais.find(m => m.codigo.toLowerCase() === i.codigoSubstituto.trim().toLowerCase());
+            const original   = catalogoMateriais.find(m => m.codigo.toLowerCase() === i.codigoOriginal.trim().toLowerCase());
+            const substituto = materiaisSubstituto.find(m => m.codigo.toLowerCase() === i.codigoSubstituto.trim().toLowerCase());
             return {
               codigoOriginal:     i.codigoOriginal,
               materialOriginal:   original?.material   ?? "—",
@@ -285,15 +292,15 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
       <div className="space-y-3">
         <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block">Itens Requisitados</label>
 
-        {!carregandoEstoque && todosOsMateriais.length === 0 && (
+        {!carregando && catalogoMateriais.length === 0 && (
           <div className="flex items-center gap-2 text-xs font-bold text-amber-600 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2.5">
-            <AlertCircle size={14} className="shrink-0" /> Nenhum material cadastrado no estoque.
+            <AlertCircle size={14} className="shrink-0" /> Nenhum material encontrado na aba código.
           </div>
         )}
 
         {itens.map((item, index) => {
-          const original   = todosOsMateriais.find(m => m.codigo.toLowerCase() === item.codigoOriginal.trim().toLowerCase());
-          const substituto = todosOsMateriais.find(m => m.codigo.toLowerCase() === item.codigoSubstituto.trim().toLowerCase());
+          const original   = catalogoMateriais.find(m => m.codigo.toLowerCase() === item.codigoOriginal.trim().toLowerCase());
+          const substituto = materiaisSubstituto.find(m => m.codigo.toLowerCase() === item.codigoSubstituto.trim().toLowerCase());
 
           return (
             <div key={index} className="p-3.5 border border-slate-100 rounded-2xl space-y-3 bg-white shadow-sm">
@@ -315,11 +322,11 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
                 <select
                   value={item.codigoOriginal}
                   onChange={e => handleItemChange(index, "codigoOriginal", e.target.value)}
-                  disabled={carregandoEstoque || todosOsMateriais.length === 0}
+                  disabled={carregando || catalogoMateriais.length === 0}
                   className="w-full text-sm px-4 py-2.5 rounded-xl border border-rose-100 bg-rose-50/40 font-bold text-[#0f172a] focus:outline-none focus:border-rose-400 disabled:opacity-60"
                 >
-                  <option value="">{carregandoEstoque ? "Carregando..." : "Selecione o material necessário..."}</option>
-                  {todosOsMateriais.map(m => (
+                  <option value="">{carregando ? "Carregando..." : "Selecione o material necessário..."}</option>
+                  {catalogoMateriais.map(m => (
                     <option key={m.codigo} value={m.codigo}>
                       {m.material} — {m.codigo}
                     </option>
@@ -342,11 +349,11 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
                 <select
                   value={item.codigoSubstituto}
                   onChange={e => handleItemChange(index, "codigoSubstituto", e.target.value)}
-                  disabled={carregandoEstoque || todosOsMateriais.length === 0}
+                  disabled={carregando || materiaisSubstituto.length === 0}
                   className="w-full text-sm px-4 py-2.5 rounded-xl border border-emerald-100 bg-emerald-50/40 font-bold text-[#0f172a] focus:outline-none focus:border-emerald-400 disabled:opacity-60"
                 >
-                  <option value="">{carregandoEstoque ? "Carregando..." : "Selecione o substituto utilizado..."}</option>
-                  {todosOsMateriais.map(m => (
+                  <option value="">{carregando ? "Carregando..." : "Selecione o substituto utilizado..."}</option>
+                  {materiaisSubstituto.map(m => (
                     <option key={m.codigo} value={m.codigo}>
                       {m.material} — {m.codigo} ({m.saldoTotal > 0 ? `${m.saldoTotal} em estoque` : "sem estoque"})
                     </option>
@@ -379,7 +386,7 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
         <button
           type="button"
           onClick={handleAdicionarItem}
-          disabled={todosOsMateriais.length === 0}
+          disabled={catalogoMateriais.length === 0}
           className="flex items-center gap-1 text-xs font-black text-amber-600 border border-dashed border-amber-200 hover:bg-amber-50 px-3 py-2 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Plus size={14} /> Adicionar outro item
@@ -400,7 +407,7 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
 
       <button
         onClick={handleEnviarRequisicao}
-        disabled={enviando || todosOsMateriais.length === 0}
+        disabled={enviando || catalogoMateriais.length === 0}
         className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl text-white transition-all shadow-md hover:opacity-90 disabled:bg-slate-300 disabled:cursor-not-allowed"
         style={{ background: "linear-gradient(135deg, #d97706, #b45309)" }}
       >
