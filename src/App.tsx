@@ -147,6 +147,272 @@ function Toast({ message, type, onDismiss }: { message: string; type: "success" 
   );
 }
 
+// ─── COMPONENTE FORMULÁRIO DE REQUISIÇÃO DE MATERIAL ───
+interface RequisicaoItem {
+  codigoOriginal: string;
+  codigoSubstituto: string;
+  quantidade: number;
+}
+
+function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: KanbanTask; onRequisicaoRegistrada: () => void }) {
+  const [itens, setItens] = useState<RequisicaoItem[]>([{ codigoOriginal: task.codigoMaterial || "", codigoSubstituto: "", quantidade: 1 }]);
+  const [observacoes, setObservacoes] = useState("");
+  const [enviando, setEnviando] = useState(false);
+  const [listaEstoque, setListaEstoque] = useState<EstoqueEntry[]>([]);
+  const [carregandoEstoque, setCarregandoEstoque] = useState(true);
+
+  useEffect(() => {
+    fetch(API_URL)
+      .then(r => r.text())
+      .then(text => {
+        if (text.trim().startsWith("{")) {
+          const data = JSON.parse(text);
+          const estoqueKey = Object.keys(data).find(k => k.toLowerCase() === "estoque");
+          const raw = estoqueKey ? data[estoqueKey] : [];
+          if (Array.isArray(raw)) {
+            setListaEstoque(raw.map((r: any) => ({
+              codigo:   String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? ""),
+              material: String(r.material ?? r.Material ?? r.MATERIAL ?? ""),
+              saldo:    Number(r.saldo    ?? r.Saldo    ?? r.SALDO    ?? 0),
+              cluster:  String(r.cluster  ?? r.Cluster  ?? r.CLUSTER  ?? "—"),
+              centro:   String(r.centro   ?? r.Centro   ?? r.CENTRO   ?? "—"),
+            })));
+          }
+        }
+      })
+      .catch(err => console.error("Erro ao puxar lista de estoque:", err))
+      .finally(() => setCarregandoEstoque(false));
+  }, []);
+
+  const todosOsMateriais = useMemo<MaterialDoCluster[]>(() => {
+    const grouped: Record<string, MaterialDoCluster> = {};
+    listaEstoque.forEach(e => {
+      const key = e.codigo.trim().toLowerCase();
+      if (!key) return;
+      if (!grouped[key]) grouped[key] = { codigo: e.codigo, material: e.material, saldoTotal: 0, centros: [] };
+      grouped[key].saldoTotal += e.saldo;
+      grouped[key].centros.push({ centro: e.centro, saldo: e.saldo });
+    });
+    return Object.values(grouped).sort((a, b) => a.material.localeCompare(b.material));
+  }, [listaEstoque]);
+
+  const materiaisDoCluster = useMemo<MaterialDoCluster[]>(() => {
+    const norm = (s: string) => (s || "").trim().toLowerCase();
+    const doCluster = listaEstoque.filter(e => norm(e.cluster) === norm(task.cluster || ""));
+    const grouped: Record<string, MaterialDoCluster> = {};
+    doCluster.forEach(e => {
+      const key = e.codigo.trim().toLowerCase();
+      if (!key) return;
+      if (!grouped[key]) grouped[key] = { codigo: e.codigo, material: e.material, saldoTotal: 0, centros: [] };
+      grouped[key].saldoTotal += e.saldo;
+      grouped[key].centros.push({ centro: e.centro, saldo: e.saldo });
+    });
+    return Object.values(grouped).sort((a, b) => a.material.localeCompare(b.material));
+  }, [listaEstoque, task.cluster]);
+
+  const handleAdicionarItem = () => setItens([...itens, { codigoOriginal: "", codigoSubstituto: "", quantidade: 1 }]);
+  const handleRemoverItem = (index: number) => setItens(itens.filter((_, i) => i !== index));
+  const handleItemChange = (index: number, campo: keyof RequisicaoItem, valor: any) => {
+    const novos = [...itens];
+    novos[index] = { ...novos[index], [campo]: valor };
+    setItens(novos);
+  };
+
+  const handleEnviarRequisicao = async () => {
+    if (itens.some(i => !i.codigoOriginal.trim())) { alert("Selecione o material requisitado em todos os itens."); return; }
+    if (itens.some(i => !i.codigoSubstituto.trim())) { alert("Selecione o material substituto em todos os itens."); return; }
+    if (itens.some(i => i.quantidade <= 0)) { alert("A quantidade deve ser maior que zero em todos os itens."); return; }
+
+    setEnviando(true);
+    try {
+      const response = await fetch(API_URL, {
+        method: "POST",
+        body: JSON.stringify({
+          action: "registrarRequisicaoMaterial",
+          id_tarefa: task.title,
+          ionix: task.ionix || "",
+          cluster: task.cluster || "—",
+          colaborador: task.colaborador || "",
+          observacoes: observacoes.trim(),
+          itens: itens.map(i => {
+            const original   = todosOsMateriais.find(m => m.codigo.toLowerCase() === i.codigoOriginal.trim().toLowerCase());
+            const substituto = todosOsMateriais.find(m => m.codigo.toLowerCase() === i.codigoSubstituto.trim().toLowerCase());
+            return {
+              codigoOriginal:     i.codigoOriginal,
+              materialOriginal:   original?.material   ?? "—",
+              codigoSubstituto:   i.codigoSubstituto,
+              materialSubstituto: substituto?.material ?? "—",
+              quantidade:         i.quantidade,
+            };
+          }),
+        }),
+      });
+
+      const text = await response.text();
+      let resData;
+      try { resData = JSON.parse(text); } catch { throw new Error("Resposta do servidor inválida."); }
+
+      if (resData.status === "success") {
+        alert("Requisição registrada com sucesso! O almoxarifado foi notificado.");
+        onRequisicaoRegistrada();
+      } else {
+        alert("Erro no backend: " + (resData.message || "Falha desconhecida"));
+      }
+    } catch (error: any) {
+      alert("Falha ao salvar: " + error.message);
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Cabeçalho informativo */}
+      <div className="rounded-2xl p-4 border border-amber-100 bg-amber-50/60">
+        <div className="flex items-start gap-3">
+          <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />
+          <div>
+            <h3 className="text-sm font-black text-amber-900 mb-0.5">Requisição de Material</h3>
+            <p className="text-xs text-amber-700 leading-relaxed">
+              Use quando o material necessário <strong>não está disponível</strong> e você precisou substituí-lo. 
+              Isso permite que o almoxarifado acompanhe quais materiais são mais demandados.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Lista de itens */}
+      <div className="space-y-3">
+        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block">Itens Requisitados</label>
+
+        {!carregandoEstoque && todosOsMateriais.length === 0 && (
+          <div className="flex items-center gap-2 text-xs font-bold text-amber-600 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2.5">
+            <AlertCircle size={14} className="shrink-0" /> Nenhum material cadastrado no estoque.
+          </div>
+        )}
+
+        {itens.map((item, index) => {
+          const original   = todosOsMateriais.find(m => m.codigo.toLowerCase() === item.codigoOriginal.trim().toLowerCase());
+          const substituto = todosOsMateriais.find(m => m.codigo.toLowerCase() === item.codigoSubstituto.trim().toLowerCase());
+
+          return (
+            <div key={index} className="p-3.5 border border-slate-100 rounded-2xl space-y-3 bg-white shadow-sm">
+              {/* Cabeçalho do item */}
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Item {index + 1}</span>
+                {itens.length > 1 && (
+                  <button type="button" onClick={() => handleRemoverItem(index)} className="p-1.5 text-rose-400 hover:bg-rose-50 rounded-lg transition-colors">
+                    <Trash2 size={13} />
+                  </button>
+                )}
+              </div>
+
+              {/* Material original (que faltou) */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-rose-400 block">
+                  Material Requisitado (que faltou)
+                </label>
+                <select
+                  value={item.codigoOriginal}
+                  onChange={e => handleItemChange(index, "codigoOriginal", e.target.value)}
+                  disabled={carregandoEstoque || todosOsMateriais.length === 0}
+                  className="w-full text-sm px-4 py-2.5 rounded-xl border border-rose-100 bg-rose-50/40 font-bold text-[#0f172a] focus:outline-none focus:border-rose-400 disabled:opacity-60"
+                >
+                  <option value="">{carregandoEstoque ? "Carregando..." : "Selecione o material necessário..."}</option>
+                  {todosOsMateriais.map(m => (
+                    <option key={m.codigo} value={m.codigo}>
+                      {m.material} — {m.codigo}
+                    </option>
+                  ))}
+                </select>
+                {original && (
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold px-1 flex-wrap">
+                    <span className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-50 text-rose-500">
+                      ❌ Saldo disponível: {original.saldoTotal}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Material substituto (o que foi usado) */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-emerald-500 block">
+                  Material Substituto (o que foi usado)
+                </label>
+                <select
+                  value={item.codigoSubstituto}
+                  onChange={e => handleItemChange(index, "codigoSubstituto", e.target.value)}
+                  disabled={carregandoEstoque || todosOsMateriais.length === 0}
+                  className="w-full text-sm px-4 py-2.5 rounded-xl border border-emerald-100 bg-emerald-50/40 font-bold text-[#0f172a] focus:outline-none focus:border-emerald-400 disabled:opacity-60"
+                >
+                  <option value="">{carregandoEstoque ? "Carregando..." : "Selecione o substituto utilizado..."}</option>
+                  {todosOsMateriais.map(m => (
+                    <option key={m.codigo} value={m.codigo}>
+                      {m.material} — {m.codigo} ({m.saldoTotal > 0 ? `${m.saldoTotal} em estoque` : "sem estoque"})
+                    </option>
+                  ))}
+                </select>
+                {substituto && (
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold px-1 flex-wrap">
+                    <span className={`flex items-center gap-1 px-2 py-0.5 rounded-md ${substituto.saldoTotal > 0 ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-500"}`}>
+                      {substituto.saldoTotal > 0 ? "✅" : "⚠️"} Saldo: {substituto.saldoTotal}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Quantidade */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block">Quantidade Necessária</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={item.quantidade}
+                  onChange={e => handleItemChange(index, "quantidade", Number(e.target.value))}
+                  className="w-full text-sm px-4 py-2.5 rounded-xl border border-slate-200 bg-white font-bold text-[#0f172a] focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+          );
+        })}
+
+        <button
+          type="button"
+          onClick={handleAdicionarItem}
+          disabled={todosOsMateriais.length === 0}
+          className="flex items-center gap-1 text-xs font-black text-amber-600 border border-dashed border-amber-200 hover:bg-amber-50 px-3 py-2 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Plus size={14} /> Adicionar outro item
+        </button>
+      </div>
+
+      {/* Observações */}
+      <div>
+        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Observações</label>
+        <textarea
+          value={observacoes}
+          onChange={e => setObservacoes(e.target.value)}
+          placeholder="Ex: material original sem previsão de reposição, substituto aprovado pelo supervisor..."
+          rows={2}
+          className="w-full text-sm px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-amber-400 resize-none"
+        />
+      </div>
+
+      <button
+        onClick={handleEnviarRequisicao}
+        disabled={enviando || todosOsMateriais.length === 0}
+        className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl text-white transition-all shadow-md hover:opacity-90 disabled:bg-slate-300 disabled:cursor-not-allowed"
+        style={{ background: "linear-gradient(135deg, #d97706, #b45309)" }}
+      >
+        {enviando
+          ? <><RefreshCw size={14} className="animate-spin" /> Registrando...</>
+          : <><Upload size={14} /> Registrar Requisição no Almoxarifado</>
+        }
+      </button>
+    </div>
+  );
+}
+
 // ─── COMPONENTE FORMULÁRIO DE CONSUMO DE MATERIAL (ATUALIZADO COM MULTI-ITENS E AUTOCOMPLETE) ───
 interface ConsumoItem {
   codigo: string;
@@ -404,7 +670,7 @@ function TaskDetailModal({
   idsComMaterialRegistrado: Record<string, RespostaItem[]>;
 }) {
   const [local, setLocal] = useState<KanbanTask>({ ...task });
-  const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes" | "consumo">("info");
+  const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes" | "consumo" | "requisicao">("info");
   const [newCheckItem, setNewCheckItem] = useState("");
   const [newNote, setNewNote] = useState("");
   const [newSubtask, setNewSubtask] = useState({ title: "", colaborador: "", status: "pendente" as SubtaskStatus });
@@ -457,7 +723,8 @@ function TaskDetailModal({
     { id: "checklist" as const, label: `Checklist${local.checklist.length ? ` ${doneChecks}/${local.checklist.length}` : ""}`, icon: <ClipboardList size={13} /> },
     { id: "subtasks" as const,  label: `Subtarefas${local.subtasks.length ? ` (${local.subtasks.length})` : ""}`, icon: <CheckCircle2 size={13} /> },
     { id: "notes" as const,     label: `Notas${local.annotations.length ? ` (${local.annotations.length})` : ""}`, icon: <MessageSquare size={13} /> },
-    { id: "consumo" as const,   label: "Baixar Material", icon: <Package size={13} /> }, 
+    { id: "consumo" as const,    label: "Baixar Material",  icon: <Package size={13} /> },
+    { id: "requisicao" as const, label: "Requisição",        icon: <Upload size={13} /> },
   ];
 
   return (
@@ -739,6 +1006,16 @@ function TaskDetailModal({
               task={local}
               registrosExistentes={idsComMaterialRegistrado[local.title.trim()] ?? null}
               onConsumoRegistrado={() => {
+                onClose();
+                onMaterialRegistrado();
+              }}
+            />
+          )}
+
+          {activeTab === "requisicao" && (
+            <FormularioRequisicaoMaterial
+              task={local}
+              onRequisicaoRegistrada={() => {
                 onClose();
                 onMaterialRegistrado();
               }}
