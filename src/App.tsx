@@ -161,7 +161,8 @@ interface ConsumoItem {
 interface EstoqueEntry { codigo: string; material: string; saldo: number; cluster: string; centro: string; }
 interface MaterialDoCluster { codigo: string; material: string; saldoTotal: number; centros: { centro: string; saldo: number }[]; }
 
-function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: KanbanTask, onConsumoRegistrado: () => void }) {
+function FormularioConsumoMaterial({ task, onConsumoRegistrado, registrosExistentes }: { task: KanbanTask, onConsumoRegistrado: () => void, registrosExistentes: RespostaItem[] | null }) {
+  const jaRegistrado = !!registrosExistentes && registrosExistentes.length > 0;
   const [itens, setItens] = useState<ConsumoItem[]>([{ codigo: task.codigoMaterial || "", quantidade: 1 }]);
   const [observacoes, setObservacoes] = useState("");
   const [enviando, setEnviando] = useState(false);
@@ -259,6 +260,49 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
 
   return (
     <div className="space-y-4">
+      {jaRegistrado && registrosExistentes && (
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 overflow-hidden">
+          <div className="flex items-start gap-3 px-4 pt-4 pb-3">
+            <AlertCircle size={16} className="text-rose-500 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-black text-rose-700">Material já registrado para este ID</p>
+              <p className="text-xs text-rose-500 mt-0.5">
+                O ID <strong>{task.title}</strong> já consta na aba Respostas. Novos registros estão bloqueados para evitar duplicidade.
+              </p>
+            </div>
+          </div>
+          <div className="border-t border-rose-100 px-4 py-3 space-y-2">
+            <p className="text-[10px] font-black uppercase tracking-widest text-rose-400 mb-2">O que foi cadastrado</p>
+            {registrosExistentes.map((reg, i) => (
+              <div key={i} className="rounded-xl bg-white border border-rose-100 px-3.5 py-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-xs font-black text-[#0f172a] truncate max-w-[60%]">{reg.material}</span>
+                  <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-rose-100 text-rose-600">- {reg.quantidade}</span>
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+                  {reg.codigo !== "—" && (
+                    <span className="text-[10px] text-slate-500 font-mono">Cód: <strong>{reg.codigo}</strong></span>
+                  )}
+                  {reg.centro !== "—" && (
+                    <span className="text-[10px] text-slate-500">Centro: <strong>{reg.centro}</strong></span>
+                  )}
+                  {reg.colaborador !== "—" && (
+                    <span className="text-[10px] text-slate-500">Por: <strong>{reg.colaborador}</strong></span>
+                  )}
+                  {reg.timestamp !== "—" && (
+                    <span className="text-[10px] text-slate-400 font-mono">{reg.timestamp}</span>
+                  )}
+                </div>
+                {reg.observacoes && (
+                  <p className="text-[10px] text-slate-400 italic border-t border-rose-50 pt-1.5">{reg.observacoes}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className={jaRegistrado ? "opacity-40 pointer-events-none select-none" : ""}>
       <div className="rounded-2xl p-4 border border-indigo-100 bg-indigo-50/50">
         <h3 className="text-sm font-black text-indigo-900 mb-1">Registrar Uso na Tarefa</h3>
         <p className="text-xs text-indigo-600">
@@ -340,15 +384,16 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado }: { task: Kanban
         <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Observações adicionais</label>
         <textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} placeholder="Opcional..." rows={2} className="w-full text-sm px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-indigo-500 resize-none" />
       </div>
-      <button onClick={handleEnviarConsumo} disabled={enviando || materiaisDoCluster.length === 0} className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl text-white transition-all shadow-md hover:opacity-90 disabled:bg-slate-300 disabled:cursor-not-allowed" style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}>
-        {enviando ? <><RefreshCw size={14} className="animate-spin" /> Registrando no Servidor...</> : "Confirmar e Dar Baixa no Estoque"}
+      <button onClick={handleEnviarConsumo} disabled={enviando || materiaisDoCluster.length === 0 || jaRegistrado} className="w-full flex items-center justify-center gap-2 text-sm font-bold py-3 rounded-2xl text-white transition-all shadow-md hover:opacity-90 disabled:bg-slate-300 disabled:cursor-not-allowed" style={{ background: jaRegistrado ? "#94a3b8" : "linear-gradient(135deg, #4f46e5, #7c3aed)" }}>
+        {enviando ? <><RefreshCw size={14} className="animate-spin" /> Registrando no Servidor...</> : jaRegistrado ? "Cadastro bloqueado — já registrado" : "Confirmar e Dar Baixa no Estoque"}
       </button>
+      </div>
     </div>
   );
 }
 
 function TaskDetailModal({
-  task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn, onMaterialRegistrado,
+  task, columnId, onClose, onUpdate, onComplete, onRemove, onReturn, onMaterialRegistrado, idsComMaterialRegistrado,
 }: {
   task: KanbanTask; columnId: string; onClose: () => void;
   onUpdate: (u: KanbanTask) => void;
@@ -356,6 +401,7 @@ function TaskDetailModal({
   onRemove: (colId: string, taskId: string) => void;
   onReturn: (colId: string, taskId: string) => void;
   onMaterialRegistrado: () => void;
+  idsComMaterialRegistrado: Record<string, RespostaItem[]>;
 }) {
   const [local, setLocal] = useState<KanbanTask>({ ...task });
   const [activeTab, setActiveTab] = useState<"info" | "checklist" | "subtasks" | "notes" | "consumo">("info");
@@ -690,7 +736,8 @@ function TaskDetailModal({
 
           {activeTab === "consumo" && (
             <FormularioConsumoMaterial 
-              task={local} 
+              task={local}
+              registrosExistentes={idsComMaterialRegistrado[local.title.trim()] ?? null}
               onConsumoRegistrado={() => {
                 onClose();
                 onMaterialRegistrado();
@@ -1515,6 +1562,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "loading" } | null>(null);
   const [dragState, setDragState] = useState<{ taskId: string; fromColId: string } | null>(null);
   const [dragOverCol, setDragOverCol] = useState<string | null>(null);
+  const [respostasPorId, setRespostasPorId] = useState<Record<string, RespostaItem[]>>({});
 
   const ablyChannelRef = useRef<any>(null);
   const myClientIdRef = useRef<string>(`client-${Math.random().toString(36).substr(2, 9)}`);
@@ -1688,6 +1736,31 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
         try { localStorage.setItem(LS_DELETED_KEY, JSON.stringify(remainingDeleted)); } catch {}
 
         setColumns(builtColumns);
+
+        // Carrega dados completos das respostas agrupados por id_tarefa
+        const respostasKey = Object.keys(data).find(k => k.toLowerCase() === "respostas");
+        const rawRespostas = respostasKey ? data[respostasKey] : [];
+        if (Array.isArray(rawRespostas)) {
+          const mapa: Record<string, RespostaItem[]> = {};
+          rawRespostas.forEach((r: any) => {
+            const id = String(r.id_tarefa || r.idTarefa || r.id || r.Id || r.IdTarefa || "").trim();
+            if (!id || id === "—") return;
+            const item: RespostaItem = {
+              timestamp:   String(r.data_consumo || r.timestamp || r.Timestamp || r.data || r.Data || "—"),
+              idTarefa:    id,
+              colaborador: String(r.colaborador || r.Colaborador || "—"),
+              cluster:     String(r.cluster || r.Cluster || "—"),
+              centro:      String(r.centro || r.Centro || "—"),
+              codigo:      String(r.codigo || r.Codigo || "—"),
+              material:    String(r.material || r["material cadastrado"] || r.Material || "—"),
+              quantidade:  String(r.quantidade || r.Quantidade || "0"),
+              observacoes: String(r.observacoes || r.Observacoes || ""),
+            };
+            if (!mapa[id]) mapa[id] = [];
+            mapa[id].push(item);
+          });
+          setRespostasPorId(mapa);
+        }
       }
     } catch (error) {
       console.error("Erro inesperado no loadKanban:", error);
@@ -2010,6 +2083,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
           onComplete={(colId, taskId) => { handleCompleteTask(colId, taskId); setOpenTask(null); }}
           onRemove={handleRemoveFromCompleted}
           onReturn={(colId, taskId) => { handleReturnTask(colId, taskId); setOpenTask(null); }}
+          idsComMaterialRegistrado={respostasPorId}
           onMaterialRegistrado={() => {
             showToast("Consumo registrado! Atualizando estoque...", "success");
             loadKanban(true);
