@@ -176,15 +176,14 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
         const codigoKey = Object.keys(data).find(k => k.toLowerCase() === "codigo");
         const rawCodigo = codigoKey ? data[codigoKey] : [];
         if (Array.isArray(rawCodigo)) {
-          setCatalogoMateriais(
-            rawCodigo
-              .map((r: any) => ({
-                codigo:   String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? "").trim(),
-                material: String(r.descricao ?? r.Descricao ?? r.DESCRICAO ?? r.material ?? r.Material ?? r.MATERIAL ?? "").trim(),
-              }))
-              .filter(r => r.codigo)
-              .sort((a, b) => a.material.localeCompare(b.material))
-          );
+          const mapped = rawCodigo
+            .map((r: any) => {
+              const codigo   = String(r.codigo   ?? r.Codigo   ?? r.CODIGO   ?? "").trim();
+              const material = String(r.descricao ?? r.Descricao ?? r.DESCRICAO ?? r.material ?? r.Material ?? r.MATERIAL ?? "").trim();
+              return { codigo, material };
+            })
+            .filter(r => r.codigo && r.material);
+          setCatalogoMateriais(mapped.sort((a, b) => a.material.localeCompare(b.material)));
         }
 
         // Aba "estoque" → para o select de substituto (com saldo visível)
@@ -335,7 +334,7 @@ function FormularioRequisicaoMaterial({ task, onRequisicaoRegistrada }: { task: 
                 {original && (
                   <div className="flex items-center gap-1.5 text-[10px] font-bold px-1 flex-wrap">
                     <span className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-50 text-rose-500">
-                      ❌ Saldo disponível: {original.saldoTotal}
+                      ✅ {original.material}
                     </span>
                   </div>
                 )}
@@ -434,11 +433,12 @@ interface ConsumoItem {
 interface EstoqueEntry { codigo: string; material: string; saldo: number; cluster: string; centro: string; }
 interface MaterialDoCluster { codigo: string; material: string; saldoTotal: number; centros: { centro: string; saldo: number }[]; }
 
-function FormularioConsumoMaterial({ task, onConsumoRegistrado, registrosExistentes }: { task: KanbanTask, onConsumoRegistrado: () => void, registrosExistentes: RespostaItem[] | null }) {
+function FormularioConsumoMaterial({ task, onConsumoRegistrado, registrosExistentes, onIrParaRequisicao }: { task: KanbanTask, onConsumoRegistrado: () => void, registrosExistentes: RespostaItem[] | null, onIrParaRequisicao?: () => void }) {
   const jaRegistrado = !!registrosExistentes && registrosExistentes.length > 0;
   const [itens, setItens] = useState<ConsumoItem[]>([{ codigo: task.codigoMaterial || "", quantidade: 1 }]);
   const [observacoes, setObservacoes] = useState("");
   const [enviando, setEnviando] = useState(false);
+  const [consumoRegistradoAgora, setConsumoRegistradoAgora] = useState(false);
 
   // Lista completa do estoque (todos os clusters), com centro incluído
   const [listaEstoque, setListaEstoque] = useState<EstoqueEntry[]>([]);
@@ -520,6 +520,7 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado, registrosExisten
           msg += "\n\nAtenção:\n" + resData.avisos.join("\n");
         }
         alert(msg);
+        setConsumoRegistradoAgora(true);
         onConsumoRegistrado();
       } else {
         alert("Erro no backend: " + (resData.message || "Falha desconhecida"));
@@ -661,6 +662,26 @@ function FormularioConsumoMaterial({ task, onConsumoRegistrado, registrosExisten
         {enviando ? <><RefreshCw size={14} className="animate-spin" /> Registrando no Servidor...</> : jaRegistrado ? "Cadastro bloqueado — já registrado" : "Confirmar e Dar Baixa no Estoque"}
       </button>
       </div>
+
+      {/* Botão para ir à requisição após cadastrar — ou se já registrado */}
+      {(consumoRegistradoAgora || jaRegistrado) && onIrParaRequisicao && (
+        <div className="rounded-2xl p-4 border border-amber-100 bg-amber-50/60 flex items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <Upload size={15} className="text-amber-500 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-xs font-black text-amber-900">Precisa registrar uma requisição?</p>
+              <p className="text-xs text-amber-700 mt-0.5">Se o material não estava disponível e foi substituído, registre a requisição.</p>
+            </div>
+          </div>
+          <button
+            onClick={onIrParaRequisicao}
+            className="shrink-0 flex items-center gap-1.5 text-xs font-black px-4 py-2 rounded-xl text-white"
+            style={{ background: "linear-gradient(135deg, #f97316, #ea580c)" }}
+          >
+            <Upload size={13} /> Ir para Requisição
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1013,9 +1034,9 @@ function TaskDetailModal({
               task={local}
               registrosExistentes={idsComMaterialRegistrado[local.title.trim()] ?? null}
               onConsumoRegistrado={() => {
-                onClose();
                 onMaterialRegistrado();
               }}
+              onIrParaRequisicao={() => setActiveTab("requisicao")}
             />
           )}
 
