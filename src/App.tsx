@@ -2232,6 +2232,55 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
   const [dragOverCol, setDragOverCol] = useState<string | null>(null);
   const [respostasPorId, setRespostasPorId] = useState<Record<string, RespostaItem[]>>({});
 
+  // ─── NOTIFICAÇÃO ADMIN ───
+  const LS_ADMIN_MSG_KEY = "tlp_admin_notification_v1";
+  const LS_ADMIN_MSG_SEEN_KEY = "tlp_admin_notification_seen_v1";
+  const [adminNotif, setAdminNotif] = useState<{ text: string; ts: number } | null>(null);
+  const [showAdminNotif, setShowAdminNotif] = useState(false);
+  const [showAdminCompose, setShowAdminCompose] = useState(false);
+  const [adminMsgDraft, setAdminMsgDraft] = useState("");
+  const isAdmin = ["jane.gomes@tlpcp.com.br", "camilly.silva@tlpcp.com.br"].includes(loggedInEmail?.toLowerCase() ?? "");
+
+  useEffect(() => {
+    const checkNotif = () => {
+      try {
+        const stored = localStorage.getItem(LS_ADMIN_MSG_KEY);
+        if (!stored) return;
+        const msg = JSON.parse(stored) as { text: string; ts: number };
+        if (!msg.text) return;
+        const seen = localStorage.getItem(LS_ADMIN_MSG_SEEN_KEY);
+        setAdminNotif(msg);
+        if (seen !== String(msg.ts)) {
+          setShowAdminNotif(true);
+        }
+      } catch {}
+    };
+    checkNotif();
+    const interval = setInterval(checkNotif, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleSendAdminNotif = () => {
+    if (!adminMsgDraft.trim()) return;
+    const msg = { text: adminMsgDraft.trim(), ts: Date.now() };
+    try {
+      localStorage.setItem(LS_ADMIN_MSG_KEY, JSON.stringify(msg));
+      localStorage.removeItem(LS_ADMIN_MSG_SEEN_KEY);
+    } catch {}
+    setAdminNotif(msg);
+    setShowAdminNotif(true);
+    setShowAdminCompose(false);
+    setAdminMsgDraft("");
+    showToast("Notificação enviada!", "success");
+  };
+
+  const handleDismissAdminNotif = () => {
+    setShowAdminNotif(false);
+    if (adminNotif) {
+      try { localStorage.setItem(LS_ADMIN_MSG_SEEN_KEY, String(adminNotif.ts)); } catch {}
+    }
+  };
+
   const ablyChannelRef = useRef<any>(null);
   const myClientIdRef = useRef<string>(`client-${Math.random().toString(36).substr(2, 9)}`);
 
@@ -2358,6 +2407,18 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
             }
             allTasksFlat.push({ apiColId: col.id, task: builtTask, key });
           });
+        });
+
+        // Merge pending task data into built tasks to preserve fields like material/codigoMaterial
+        allTasksFlat.forEach(entry => {
+          const p = pending[entry.key];
+          if (p && now - p.ts <= PENDING_TTL_MS) {
+            // Preserve fields from pending task that may not come from API in other columns
+            if (p.task.material && p.task.material !== "—") entry.task.material = p.task.material;
+            if (p.task.codigoMaterial) entry.task.codigoMaterial = p.task.codigoMaterial;
+            if (p.task.saldoEstoque !== undefined) entry.task.saldoEstoque = p.task.saldoEstoque;
+            if (p.task.quantidade && p.task.quantidade !== "—") entry.task.quantidade = p.task.quantidade;
+          }
         });
 
         const liveTasks = allTasksFlat.filter(({ key }) => {
@@ -2743,6 +2804,85 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
     <div className="flex h-screen overflow-hidden" style={{ background: "#f1f5f9" }}>
       {toast && <Toast message={toast.message} type={toast.type} onDismiss={dismissToast} />}
 
+      {/* ─── POPUP NOTIFICAÇÃO ADMIN ─── */}
+      {showAdminNotif && adminNotif && (
+        <div className="fixed inset-0 z-[200] flex items-start justify-center pt-16 px-4" style={{ pointerEvents: "none" }}>
+          <div
+            className="w-full max-w-lg rounded-3xl shadow-2xl border overflow-hidden animate-bounce-in"
+            style={{ background: "#0f172a", borderColor: "#4f46e5", pointerEvents: "all" }}
+          >
+            <div className="h-1 w-full" style={{ background: "linear-gradient(90deg, #4f46e5, #7c3aed, #f97316)" }} />
+            <div className="px-6 py-5">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0" style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}>
+                  <Zap size={16} className="text-white" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#818cf8" }}>📢 Aviso do Admin</span>
+                    <span className="text-[9px] text-slate-500">{new Date(adminNotif.ts).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}</span>
+                  </div>
+                  <p className="text-white font-bold text-sm leading-relaxed">{adminNotif.text}</p>
+                </div>
+                <button
+                  onClick={handleDismissAdminNotif}
+                  className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition-colors shrink-0"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── MODAL COMPOR NOTIFICAÇÃO ADMIN ─── */}
+      {showAdminCompose && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center" style={{ background: "rgba(10,16,36,0.7)", backdropFilter: "blur(4px)" }}>
+          <div className="w-full max-w-md rounded-3xl shadow-2xl overflow-hidden" style={{ background: "#fff" }}>
+            <div className="h-1 w-full" style={{ background: "linear-gradient(90deg, #4f46e5, #7c3aed, #f97316)" }} />
+            <div className="px-6 py-5">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}>
+                    <Zap size={14} className="text-white" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-black text-[#0f172a]">Nova Notificação</p>
+                    <p className="text-[10px] text-slate-400">Aparecerá para todos os usuários</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowAdminCompose(false)} className="p-2 rounded-xl hover:bg-slate-100 text-slate-400">
+                  <X size={15} />
+                </button>
+              </div>
+              <textarea
+                value={adminMsgDraft}
+                onChange={e => setAdminMsgDraft(e.target.value)}
+                placeholder="Ex: Atacar o item X hoje! Prioridade máxima para cluster Sul..."
+                rows={4}
+                className="w-full text-sm px-4 py-3 rounded-2xl border border-slate-200 bg-slate-50 focus:outline-none focus:border-indigo-400 resize-none font-medium text-[#0f172a]"
+                autoFocus
+              />
+              <div className="flex gap-2 mt-3">
+                <button
+                  onClick={handleSendAdminNotif}
+                  disabled={!adminMsgDraft.trim()}
+                  className="flex-1 flex items-center justify-center gap-2 text-sm font-black py-2.5 rounded-2xl text-white transition-all disabled:opacity-40"
+                  style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}
+                >
+                  <Zap size={14} /> Enviar Notificação
+                </button>
+                <button onClick={() => setShowAdminCompose(false)} className="px-4 py-2.5 rounded-2xl border text-sm text-slate-400 hover:bg-slate-50">
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+
       {openTask && (
         <TaskDetailModal
           task={openTask.task}
@@ -2858,6 +2998,32 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
             </div>
 
             <div className="flex items-center gap-2 pl-3 ml-1" style={{ borderLeft: "1px solid #e2e8f0" }}>
+              {/* Botão de notificação */}
+              <div className="relative">
+                <button
+                  onClick={() => adminNotif ? setShowAdminNotif(v => !v) : (isAdmin ? setShowAdminCompose(true) : null)}
+                  title={adminNotif ? "Ver aviso do admin" : isAdmin ? "Enviar notificação" : "Sem avisos"}
+                  className="p-2 rounded-xl hover:bg-slate-100 transition-colors relative"
+                  style={{ color: adminNotif ? "#4f46e5" : "#94a3b8" }}
+                >
+                  <AlertCircle size={17} />
+                  {adminNotif && (() => {
+                    try { return localStorage.getItem(LS_ADMIN_MSG_SEEN_KEY) !== String(adminNotif.ts); } catch { return false; }
+                  })() && (
+                    <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-rose-500 ring-2 ring-white" />
+                  )}
+                </button>
+              </div>
+              {isAdmin && (
+                <button
+                  onClick={() => setShowAdminCompose(true)}
+                  title="Nova notificação para a equipe"
+                  className="flex items-center gap-1.5 text-xs font-black px-3 py-1.5 rounded-xl text-white transition-all"
+                  style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}
+                >
+                  <Zap size={12} /> Avisar equipe
+                </button>
+              )}
               <div
                 className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[10px] shrink-0 ring-2 ring-white"
                 style={{ background: "linear-gradient(135deg, #4f46e5, #7c3aed)" }}
@@ -2923,17 +3089,18 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
                     const prio = priorityBadge(task.priority);
                     const meta = getCollabMeta(task.colaborador);
                     const isDuplicate = duplicateTitleSet.has(task.title);
+                    const hasMaterial = !!(respostasPorId[task.title]?.length);
                     return (
                       <div
                         key={task.id}
                         draggable
                         onDragStart={() => handleDragStart(task.id, col.id)}
                         onDragEnd={() => { setDragState(null); setDragOverCol(null); }}
-                        className="bg-white rounded-2xl shadow-sm group hover:shadow-md transition-all cursor-grab active:cursor-grabbing overflow-hidden"
+                        className="rounded-2xl shadow-sm group hover:shadow-md transition-all cursor-grab active:cursor-grabbing overflow-hidden"
                         style={{
-                          border: isDuplicate ? "1.5px solid #f59e0b" : "1px solid #e8ecf4",
+                          border: isDuplicate ? "1.5px solid #f59e0b" : hasMaterial ? "1.5px solid #10b981" : "1px solid #e8ecf4",
                           opacity: dragState?.taskId === task.id ? 0.3 : 1,
-                          background: isDuplicate ? "#fffdf0" : "#fff",
+                          background: isDuplicate ? "#fffdf0" : hasMaterial ? "#f0fdf4" : "#fff",
                         }}
                         onClick={() => setOpenTask({ task, columnId: col.id })}
                       >
@@ -2948,6 +3115,11 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
                                 {isDuplicate && (
                                   <span className="shrink-0 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md" style={{ background: "#fef3c7", color: "#b45309", border: "1px solid #f59e0b" }}>
                                     ID dup.
+                                  </span>
+                                )}
+                                {hasMaterial && (
+                                  <span className="shrink-0 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md flex items-center gap-0.5" style={{ background: "#dcfce7", color: "#15803d", border: "1px solid #86efac" }}>
+                                    ✓ Material
                                   </span>
                                 )}
                               </div>
