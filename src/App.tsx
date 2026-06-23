@@ -2233,7 +2233,6 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
   const [respostasPorId, setRespostasPorId] = useState<Record<string, RespostaItem[]>>({});
 
   // ─── NOTIFICAÇÃO ADMIN ───
-  const LS_ADMIN_MSG_KEY = "tlp_admin_notification_v1";
   const LS_ADMIN_MSG_SEEN_KEY = "tlp_admin_notification_seen_v1";
   const [adminNotif, setAdminNotif] = useState<{ text: string; ts: number } | null>(null);
   const [showAdminNotif, setShowAdminNotif] = useState(false);
@@ -2241,37 +2240,17 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
   const [adminMsgDraft, setAdminMsgDraft] = useState("");
   const isAdmin = ["jane.gomes@tlpcp.com.br", "camilly.silva@tlpcp.com.br"].includes(loggedInEmail?.toLowerCase() ?? "");
 
-  useEffect(() => {
-    const checkNotif = () => {
-      try {
-        const stored = localStorage.getItem(LS_ADMIN_MSG_KEY);
-        if (!stored) return;
-        const msg = JSON.parse(stored) as { text: string; ts: number };
-        if (!msg.text) return;
-        const seen = localStorage.getItem(LS_ADMIN_MSG_SEEN_KEY);
-        setAdminNotif(msg);
-        if (seen !== String(msg.ts)) {
-          setShowAdminNotif(true);
-        }
-      } catch {}
-    };
-    checkNotif();
-    const interval = setInterval(checkNotif, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
   const handleSendAdminNotif = () => {
     if (!adminMsgDraft.trim()) return;
-    const msg = { text: adminMsgDraft.trim(), ts: Date.now() };
-    try {
-      localStorage.setItem(LS_ADMIN_MSG_KEY, JSON.stringify(msg));
-      localStorage.removeItem(LS_ADMIN_MSG_SEEN_KEY);
-    } catch {}
+    const msg = { text: adminMsgDraft.trim(), ts: Date.now(), sender: loggedInEmail };
+    ablyChannelRef.current?.publish("adminNotification", msg);
+    // Also show locally for the sender
     setAdminNotif(msg);
     setShowAdminNotif(true);
+    try { localStorage.setItem(LS_ADMIN_MSG_SEEN_KEY, String(msg.ts)); } catch {}
     setShowAdminCompose(false);
     setAdminMsgDraft("");
-    showToast("Notificação enviada!", "success");
+    showToast("Notificação enviada para a equipe!", "success");
   };
 
   const handleDismissAdminNotif = () => {
@@ -2543,6 +2522,14 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
         ...col,
         tasks: col.tasks.filter(t => t.id !== taskId)
       })));
+    });
+
+    channel.subscribe("adminNotification", (message) => {
+      const msg = message.data as { text: string; ts: number; sender: string };
+      if (!msg?.text) return;
+      setAdminNotif(msg);
+      setShowAdminNotif(true);
+      try { localStorage.removeItem("tlp_admin_notification_seen_v1"); } catch {}
     });
 
     return () => {
@@ -3007,9 +2994,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
                   style={{ color: adminNotif ? "#4f46e5" : "#94a3b8" }}
                 >
                   <AlertCircle size={17} />
-                  {adminNotif && (() => {
-                    try { return localStorage.getItem(LS_ADMIN_MSG_SEEN_KEY) !== String(adminNotif.ts); } catch { return false; }
-                  })() && (
+                  {showAdminNotif && adminNotif && (
                     <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-rose-500 ring-2 ring-white" />
                   )}
                 </button>
