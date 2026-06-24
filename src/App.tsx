@@ -1933,8 +1933,7 @@ function ColaboradoresView({ columns }: { columns: Column[] }) {
   const stats = COLLABORATORS.map(c => {
     const myTasks = allTasks.filter(t => t.colaborador === c.name);
     const concluded = myTasks.filter(t => t.colId === "concluido").length;
-    const inProgress = myTasks.filter(t => t.colId === "acaost").length;
-    const pending = myTasks.filter(t => t.colId === "semservico").length;
+    const inProgress = myTasks.filter(t => t.colId === "servicoscl").length;
     const materials = myTasks.filter(t => t.colId === "materiaiscl").length;
     const baixaOcup = myTasks.filter(t => t.colId === "baixaocupacao").length;
     const total = myTasks.length;
@@ -2051,8 +2050,7 @@ function RelatoriosView({ columns }: { columns: Column[] }) {
   const allTasks = columns.flatMap(col => col.tasks.map(t => ({ ...t, colId: col.id, colTitle: col.title, colColor: col.color })));
   const total = allTasks.length;
   const concluded = allTasks.filter(t => t.colId === "concluido").length;
-  const pending = allTasks.filter(t => t.colId === "semservico").length;
-  const acaoST = allTasks.filter(t => t.colId === "acaost").length;
+  const servicosCL = allTasks.filter(t => t.colId === "servicoscl").length;
   const materiaisCL = allTasks.filter(t => t.colId === "materiaiscl").length;
   const baixaOcup = allTasks.filter(t => t.colId === "baixaocupacao").length;
   const conclusionRate = total > 0 ? Math.round((concluded / total) * 100) : 0;
@@ -2088,7 +2086,7 @@ function RelatoriosView({ columns }: { columns: Column[] }) {
           {[
             { label: "Total de cards",    val: total,          bg: "#f8fafc", color: "#0f172a",  accent: "#e2e8f0" },
             { label: "Concluídos",        val: concluded,      bg: "#f0fdf4", color: "#059669",  accent: "#bbf7d0" },
-            { label: "Ação ST",           val: acaoST,         bg: "#eff6ff", color: "#2563eb",  accent: "#bfdbfe" },
+            { label: "Serviços CL",       val: servicosCL,     bg: "#eff6ff", color: "#2563eb",  accent: "#bfdbfe" },
             { label: "Baixa Ocupação",    val: baixaOcup,      bg: "#fffbeb", color: "#d97706",  accent: "#fde68a" },
             { label: "Taxa de conclusão", val: `${conclusionRate}%`, bg: "#f5f3ff", color: "#6d28d9", accent: "#ddd6fe" },
           ].map(kpi => (
@@ -2270,9 +2268,8 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
   const dismissToast = useCallback(() => setToast(null), []);
 
   const officialColumnsStructure = useMemo(() => [
-    { id: "semservico",    title: "Sem Serviço",    color: "#ef4444", accent: "#fee2e2" },
     { id: "materiaiscl",  title: "Materiais CL",   color: "#84cc16", accent: "#f7fee7" },
-    { id: "acaost",       title: "Ação ST",        color: "#3b82f6", accent: "#eff6ff" },
+    { id: "servicoscl",       title: "Serviços CL",        color: "#3b82f6", accent: "#eff6ff" },
     { id: "baixaocupacao", title: "Baixa Ocupação", color: "#f59e0b", accent: "#fffbeb" },
     { id: "concluido",    title: "Concluído",      color: "#10b981", accent: "#f0fdf4" },
   ], []);
@@ -2716,7 +2713,7 @@ function KanbanBoard({ loggedInEmail, onLogout }: { loggedInEmail: string; onLog
     showToast(`Card movido para ${columns.find(c => c.id === toColId)?.title}`, "success");
     persistColumnPos(preparedTask, toColId);
 
-    const apiAction = toColId === "acaost" ? "createActionST" : toColId === "baixaocupacao" ? "createBaixaOcupacao" : "updateTask";
+    const apiAction = toColId === "" ? "createActionST" : toColId === "baixaocupacao" ? "createBaixaOcupacao" : "updateTask";
     const cleanTask = { 
       ...preparedTask, 
       id: preparedTask.title,
