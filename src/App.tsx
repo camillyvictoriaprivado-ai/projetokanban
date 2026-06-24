@@ -1938,6 +1938,7 @@ function ColaboradoresView({ columns }: { columns: Column[] }) {
     const baixaOcup = myTasks.filter(t => t.colId === "baixaocupacao").length;
     const total = myTasks.length;
     const pct = total > 0 ? Math.round((concluded / total) * 100) : 0;
+    const pending = Math.max(0, total - (concluded + inProgress + materials + baixaOcup));
     return { ...c, total, concluded, inProgress, pending, materials, baixaOcup, pct, tasks: myTasks };
   });
 
